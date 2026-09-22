@@ -1,0 +1,79 @@
+# arena control-law author guide
+
+All laws are evaluated on **exactly the same scenario suite**. This guide defines the interface and the evaluation method. Run `python -m ...` from the repository root.
+
+## Interface (must be followed strictly)
+
+Your file: `arena/laws/<name>.py` (imported by `__init__.py` — add an import line there, so it is active as soon as it exists).
+
+```python
+from __future__ import annotations
+import math
+from typing import Optional, Tuple
+from arena.core import Observation, LawConfig
+from arena.laws.base import CountsHist, Law, register
+
+@register("<law_name>")
+class MyLaw(Law):
+    def __init__(self, <tunable parameters, with defaults>): ...
+    def reset(self, cfg: LawConfig):
+        self.cfg = cfg
+        # reset ALL internal state (filters/integrators/history)
+    def step(self, t: float, obs: Optional[Observation]) -> Tuple[int, int]:
+        # return integer counts (cx, cy)
+        ...
+        return cx, cy
+```
+
+### Observation (arena → law)
+- `obs.t`: frame timestamp (ms) = capture time + L_true.
+- `obs.dx, obs.dy`: measured (target − crosshair) in px, reflecting the world as of `(obs.t − L_true)`, noise included.
+- `obs.new`: True = new frame since the last tick; False = same frame (inter-frame extrapolation is up to you).
+- `obs` may be None (no frame yet at startup).
+
+### LawConfig
+`cfg.s` (px/count, believed value), `cfg.L` (ms, believed delay), `cfg.h` (2ms), `cfg.frame_dt`
+(8.33ms @120fps), `cfg.max_v` (px/ms, ~1.5), `cfg.count_limit` (120), `cfg.fov_radius` (150).
+
+## Plant/sensor ground truth (arena is neutral; these are reliable facts)
+- Crosshair integrates: every tick `crosshair += s_true × counts_you_sent`.
+- **The only delay is on the observation side**: a frame stamped `obs.t` reflects the world as of `obs.t − L_true`.
+- Control runs at 500Hz (2ms), observations at 120fps (8.33ms) — about 4 ticks per frame.
+- You keep your own command history and detection history; arena provides nothing else.
+  The cumulative-counts ring buffer (`CountsHist` in `laws/base.py`) is shared infrastructure
+  all laws use for in-flight subtraction and command replay.
+- `cfg.s`/`cfg.L` are the values you **believe**; arena's ground truth may differ (mismatch testing).
+- Units are px / px/ms. To command velocity v (px/ms): `counts = v * cfg.h / cfg.s`.
+- Use remainder-accumulation quantization so small corrections don't truncate to 0.
+
+## Evaluation (standard battery, identical for everyone)
+CLI: `python -m arena.eval <law_name>`
+or:
+```python
+from arena.laws.base import get_law
+from arena.eval import test_suite
+test_suite(lambda: get_law("<law_name>")())
+```
+The battery: (A) standard multi-scenario suite @ matched L=50 / 120fps; (B) delay-mismatch
+sweep L_true ∈ {30,40,50,60,70}, belief=50; (C) 60 vs 120fps. Prints composite + OVERALL
+(lower is better). **Divergence is heavily penalized** — a law that diverges under mismatch
+loses no matter how fast it is. Also run `python -m arena.integrate <law_name>` for relock +
+the wide-delay sweep L_true ∈ {20..80} + sensitivity mismatch, and `python -m arena.fps_eval
+<law_name>` for the FPS behavior suite.
+
+## Reference baseline (ff_pi_acc, the current shipped control law)
+OVERALL=123.6, matched composite=114.7 (step settle 277ms / overshoot 3.1px / first reach 177ms;
+const_vel rmse 0.8px; accel rmse 4.4px; maneuver rmse 19.4px), worst mismatch=125.1, relock 386ms.
+Passes the sensitivity band s0.7–1.3; at the wide-delay corner L_true=80 the step settle rides the
+3px knife edge (no divergence). Goal: beat it across the board.
+
+## Process debugging (`arena/trace.py`, per law)
+
+- `python -m arena.trace <law> <scenario> [--L-true 30] [--csv out.csv]` replays a single run: per-tick CSV (`t/ex/ey/abs_e/sent_cx/sent_cy/obs_t/obs_dx/obs_dy/obs_new`), a terminal process summary (band-entry ladder 10/5/3/1px, event windows via `event_metrics`, worst-1s window, tail-oscillation verdict) and window export (`--event N`, `--auto-window`, `--window a:b`). Outputs go to gitignored `arena/trace_out/`. Pure observation — it never changes any metric.
+- Optional hook: implement `debug(self) -> dict[str, float]` on your law; trace records it per tick as `dbg_*` columns. Document every field's meaning in your law's docstring — arena does not interpret them. `debug()` must be side-effect-free; eval/integrate/fps_eval never call it.
+- While debugging, work on a copy `arena/laws/_wip_<name>.py` registered as `wip_<name>`; `_wip_*.py` files are auto-imported, so no `__init__.py` edit is needed.
+
+## Rules
+- Only modify your own law file; don't touch core/runner/eval/scenarios/base.
+- You **must actually run arena and iterate** — theory alone doesn't count. Tune the method to its own optimum before reporting.
+- Report: best parameters + full battery output + mismatch-robustness profile (diverges or not / at which L_true) + known limitations.

@@ -1,0 +1,30 @@
+# ---- Python ----
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# ---- 编译产物 / 模型 (build/bin/engine/onnx/dataset 只留在部署机, 不进仓库) ----
+build/
+bin/
+engine/
+onnx/
+dataset/
+*.engine
+*.onnx
+trt_timing_cache.cache
+
+# ---- WebUI 运行时状态 (config/profile/历史, 只留在设备上) ----
+webui/data/
+
+# ---- arena 诊断输出 (trace CSV/PNG, 可再生) ----
+arena/trace_out/
+
+# ---- OS 杂物 ----
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- 个人游戏脚本 (含私有标定值, 不进仓库; 仓库只留一份模板) ----
+scripts/game/*
+!scripts/game/template.sh.example
