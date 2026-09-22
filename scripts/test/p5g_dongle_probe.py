@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ==============================================================================
-#  p5g_dongle_probe.py — P5 General 加密狗 bring-up 探针 (Jetson, sudo)
+#  p5g_dongle_probe.py — P5 General 加密狗 bring-up 探针 (RK3588 板端, sudo)
 #
 #  在加密狗第一次插上本机时运行, 逐项核对固件 (io/pad_p5g) 依赖的每一条主机侧
 #  契约, 并把协议文档 (docs/p5general/) 第 10 节"未能从代码确定的事项"里能由
@@ -73,7 +73,7 @@ def main():
     # ① 枚举形态
     devdir, name = find_hid_device()
     if not devdir:
-        fail("加密狗未枚举 (无 0003:2B81:0101.* 于 /sys/bus/hid) — 确认插在 Jetson "
+        fail("加密狗未枚举 (无 0003:2B81:0101.* 于 /sys/bus/hid) — 确认插在本机 "
              "主机口, lsusb 应见 2b81:0101")
         return 1
     ok("已枚举: %s" % name)
@@ -189,7 +189,7 @@ def main():
         ok("设备侧: /dev/raw-gadget 与 UDC 就绪 (插 PS5 的口)")
         checks += 1
     else:
-        fail("设备侧: /dev/raw-gadget 或 UDC 缺失 — sudo bash scripts/setup_mouse.sh")
+        fail("设备侧: /dev/raw-gadget 或 UDC 缺失 — sudo bash scripts/setup_platform.sh")
 
     print("== %s (%d/%d 项通过) ==" %
           ("加密狗侧就绪, 可启动 -M p5g 对 PS5 联调" if n_ok else "流水线未验证 — 见上行说明",

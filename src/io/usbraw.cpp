@@ -581,7 +581,7 @@ bool usbraw_start(UsbRawSession& s, const UsbRawDeviceDef& dev) {
         std::cerr << "❌ 无法打开 /dev/raw-gadget (" << strerror(errno) << ")\n"
                   << "   模块缺失/未载 → 本机内核须先具备 raw_gadget (modprobe;"
                   << " 缺失时按内核文档自行构建)\n"
-                  << "   权限不足       → sudo bash scripts/setup_mouse.sh\n";
+                  << "   权限不足       → sudo bash scripts/setup_platform.sh\n";
         return false;
     }
     if (ioctl(s.fd, USB_RAW_IOCTL_INIT, &init) < 0) {
@@ -593,7 +593,7 @@ bool usbraw_start(UsbRawSession& s, const UsbRawDeviceDef& dev) {
         const int e = errno;
         std::cerr << "❌ raw_gadget RUN 失败: " << strerror(e) << "\n";
         if (e == EBUSY)
-            std::cerr << "   UDC 被占: 先 sudo bash scripts/setup_mouse.sh 腾空 (解绑遗留 gadget, 停占用进程)\n";
+            std::cerr << "   UDC 被占: 先 sudo bash scripts/setup_platform.sh 腾空 (解绑遗留 gadget, 停占用进程)\n";
         close(s.fd); s.fd = -1;
         return false;
     }

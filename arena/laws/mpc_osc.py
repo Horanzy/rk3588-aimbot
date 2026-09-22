@@ -118,7 +118,7 @@ matched composite 160.3 (const_vel rmse 0.70px, accel 6.05px, step 过冲 3.0px 
 已知边界: L_true=80 (+25ms) 的慢速边缘气泡 (±6-13px, ~330ms 周期) 创新不可见 (被
 α 通道跟踪), 本门不覆盖 → L80 仍 settle-fail。其自激直接通路 (vff=1) 增益≈1, 压低
 它只能牺牲 matched 带宽或前馈精确性 —— 按系统哲学交给标定, 不硬凑。另: QP/tick 计算
-重, Jetson 500Hz 嵌入式算力未验证。
+重, 嵌入式 500Hz 算力未验证。
 
 与 rejected paths 的边界: 不重瞄准 FF (只按振荡证据暂时隔离); 不做常开机动自适应估计
 (无第二模型; σ̂ 有 Huber 守卫, 无致盲路径); 不在线适配延迟 (L̂ 恒为标定值, 翻转窗

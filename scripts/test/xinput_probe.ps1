@@ -1,6 +1,6 @@
 # ============================================================================
 #  xinput_probe.ps1 -- Windows-side verdict probe for the XInput device the
-#    Jetson emulates (VID 0x045E / PID 0x028E, wired Xbox 360 pad).
+#    the board emulates (VID 0x045E / PID 0x028E, wired Xbox 360 pad).
 #
 #  Mechanism: P/Invoke xinput1_4.dll!XInputGetState, polling the four user
 #    slots and printing the return code, the packet number and the decoded

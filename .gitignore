@@ -4,15 +4,13 @@ venv/
 __pycache__/
 *.py[cod]
 
-# ---- 编译产物 / 模型 (build/bin/engine/onnx/dataset 只留在部署机, 不进仓库) ----
+# ---- 编译产物 / 模型 / 数据集 (build bin engine dataset 只留在部署机, 不进仓库) ----
 build/
 bin/
 engine/
-onnx/
 dataset/
-*.engine
-*.onnx
-trt_timing_cache.cache
+# 模型权重: .axmodel 由仓库外部的转换流程产出后放进 engine/ (转换不在本仓库内)
+*.axmodel
 
 # ---- WebUI 运行时状态 (config/profile/历史, 只留在设备上) ----
 webui/data/

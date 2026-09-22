@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================================
-#  uinput_pad_test.py — 手柄模式输入/合并层的端到端验证 (Jetson 本机)。
+#  uinput_pad_test.py — 手柄模式输入/合并层的端到端验证 (RK3588 板端本机)。
 #
 #  用 /dev/uinput 合成一只虚拟 Xbox 布局手柄 (xpad 风格: RX/RY=右摇杆 ±32767,
 #  Z/RZ=扳机 0..1023 — 刻意与实体 GameSir-G7 Pro 的 HID 风格布局不同, 以覆盖
@@ -18,7 +18,7 @@
 #
 #  跑法 (仓库根, 手柄模式需要 evdev/uinput 权限, sudo 运行):
 #    sudo python3 scripts/test/uinput_pad_test.py [--mode pad|p5g] \
-#        [--aimbot bin/aimbot] [--model engine/apex.engine] [--cam /dev/video0]
+#        [--aimbot bin/aimbot] [--model engine/apex.axmodel] [--cam /dev/video0]
 #  全过输出 ALL PASS 返回 0。
 # ============================================================================
 import argparse
@@ -197,7 +197,7 @@ def main():
     ap.add_argument("--mode", default="pad", choices=("pad", "p5g"),
                     help="输出后端 (两者共用输入/合并/发布链; 断言面相同)")
     ap.add_argument("--aimbot", default=os.path.join(ROOT, "bin", "aimbot"))
-    ap.add_argument("--model", default=os.path.join(ROOT, "engine", "apex.engine"))
+    ap.add_argument("--model", default=os.path.join(ROOT, "engine", "apex.axmodel"))
     ap.add_argument("--cam", default="/dev/video0")
     ap.add_argument("--log", default="/tmp/pad_e2e.log")
     args = ap.parse_args()
@@ -211,7 +211,7 @@ def main():
     logf = open(args.log, "w")
     proc = subprocess.Popen(
         [args.aimbot, "-M", args.mode, "--pad-dump", "-P", "padtest",
-         "-m", args.model, "-d", args.cam, "-f", "120",
+         "-m", args.model, "-d", args.cam,
          "-t", "0.4", "-y", "65", "-x", "1500", "-k", "fire", "-v", "n"],
         stdout=logf, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
     d = None

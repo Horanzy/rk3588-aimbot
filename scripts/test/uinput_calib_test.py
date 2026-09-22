@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================================
-#  uinput_calib_test.py — 标定链路的真机验收 (Jetson 本机, 与 AI 检测无关)。
+#  uinput_calib_test.py — 标定链路的真机验收 (RK3588 板端本机, 与 AI 检测无关)。
 #
 #  用 /dev/uinput 合成输入设备按模式驱动一次完整标定轮, 并断言四件事:
 #    [1] 触发: hid = 鼠标双侧键 (BTN_SIDE+BTN_EXTRA = HID 侧键位 0x10|0x08) 长按 5s;

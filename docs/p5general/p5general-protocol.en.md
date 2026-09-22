@@ -469,7 +469,7 @@ Supporting framework:
 
 ## 14. Hardware Measurement Addendum
 
-The following facts come from measurements in this repository on a Jetson Orin with a real P5 General dongle and a PS5; they answer part of section 10 directly. Reproduction path: `sudo python3 scripts/test/p5g_dongle_probe.py` (dongle side) plus launching the backend with `-M p5g` while watching the console (PS5 side).
+The following facts come from measurements on a real P5 General dongle with a PS5 as host (the dongle's behaviour is a property of the device, not of the board driving it); they answer part of section 10 directly. Reproduction path: `sudo python3 scripts/test/p5g_dongle_probe.py` (dongle side) plus launching the backend with `-M p5g` while watching the console (PS5 side). **The host side has not been exercised against a real console from this repository's deployment board (RK3588)**: the dongle-side facts stand as recorded, while "a host accepts the device this repository presents" rests on `build/pad_test`'s structural assertions and is not hardware-accepted.
 
 | Item | Measured result | Section 10 entry |
 |---|---|---|

@@ -126,8 +126,9 @@ COOLDOWN_MS="${COOLDOWN_MS:-800}"       # 检测/定时截图冷却 ms (开火�
 JPEG_Q="${JPEG_Q:-95}"                  # JPEG 质量
 
 # ==============================================================================
-sudo jetson_clocks
-sudo bash "$ROOT/scripts/setup_mouse.sh"
+# 平台前提 (librga / raw_gadget + UDC / axcl): 幂等, 已备好时只回读版本; 面板启动走的是
+#   同一条脚本, 所以手动跑与面板跑落在同一套前提上。
+sudo bash "$ROOT/scripts/setup_platform.sh"
 
 SCRIPT_PATH="$(realpath "$0")"
 

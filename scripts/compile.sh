@@ -19,8 +19,9 @@ INCLUDES="-I$SRC -I/usr/include/opencv4 -I/usr/include/axcl -I/usr/local/include
 OCV="-lopencv_core -lopencv_videoio -lopencv_highgui -lopencv_imgproc -lopencv_video -lopencv_imgcodecs"
 
 # axcl (NPU 运行时) 与 librga (裁切/格式转换) 都是**部署机自带的系统库**: axcl 装在
-#   /usr/lib/axcl 并已进 ldconfig, librga 装在 /usr/local (头文件 /usr/local/include/rga),
-#   两者都由 scripts/setup_platform.sh 从上游装好 —— 与本库自身放在哪里无关。
+#   /usr/lib/axcl 并已进 ldconfig (板级 BSP 的一部分), librga 装在 /usr/local (头文件
+#   /usr/local/include/rga) 并由 scripts/setup_platform.sh 从上游装好 —— 与本库自身放在
+#   哪里无关。
 LIBS="-L/usr/lib/axcl -laxcl_rt -laxcl_pkg -lrga"
 PTHREAD="-pthread"
 
