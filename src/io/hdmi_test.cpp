@@ -10,6 +10,8 @@
 //    [4] 常量的推导关系 (改一个必须连带改另一个): fence 上限覆盖一个 60fps 帧周期且
 //        不超过它的 2.5 倍、poll 预算是整分片、分片 = 驱动自己的锁定重试步长、
 //        重建节拍介于一次锁定步长与一次有界等锁之间、缓冲块数的上下界
+//    [5] 取出而未交付的帧的归宿: 只有"交给调用方"这一支不归还 —— 另两支 (被新帧取代、
+//        排空循环中途放弃) 都必须关掉 fence dup 并归还缓冲
 //  全部断言通过输出 ALL PASS 并返回 0; 任一断言失败返回非零 (compile.sh 的 set -e
 //  终止编译)。
 // ============================================================================
@@ -93,6 +95,24 @@ int main() {
         CHECK(HDMI_BUF_MIN <= HDMI_BUF_DEFAULT && HDMI_BUF_DEFAULT <= HDMI_BUF_MAX,
               "缓冲块数上下界包住缺省值");
         CHECK(HDMI_BUF_MIN >= 2, "驱动自己的 min_buffers_needed = 2 是下限");
+    }
+
+    // ---------------- [5] 取出而未交付的帧的归宿 ----------------
+    {
+        std::cout << "[5] 取出而未交付的帧: 关 fence dup + 归还缓冲\n";
+        CHECK(!hdmi_pull_requires_giveback(HdmiPullFate::Delivered),
+              "交付那一支不归还: 帧连同 fence 的所有权一起交给调用方 —— 交付路径上 wait_fence "
+              "已经关掉那个 dup, 所以交给调用方的帧其 fence_fd 必为 −1 (调用方不需要、也不该关)");
+        CHECK(hdmi_pull_requires_giveback(HdmiPullFate::Superseded),
+              "被更新的帧取代必须当场归还 (最新帧语义): 不归还就是漏一个内核给的 dup, 且那块缓冲"
+              "在被 release 之前回不到队列");
+        CHECK(hdmi_pull_requires_giveback(HdmiPullFate::Abandoned),
+              "排空循环中途放弃 (DQBUF 出错 / 时间戳口径不符) 同样必须归还 —— 这两个出口最容易"
+              "只 return 而不归还, 于是每次会话重建漏一个 dup 并永久少一块缓冲 (块数固定)");
+        static_assert(!hdmi_pull_requires_giveback(HdmiPullFate::Delivered) &&
+                          hdmi_pull_requires_giveback(HdmiPullFate::Superseded) &&
+                          hdmi_pull_requires_giveback(HdmiPullFate::Abandoned),
+                      "归宿表在编译期也成立");
     }
 
     std::cout << (g_fail ? "FAILED\n" : "ALL PASS\n");

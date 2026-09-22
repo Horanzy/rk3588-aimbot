@@ -30,7 +30,11 @@ _GUARD_RE = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*:-?(.*)\}$", re.S)
 # 参数定义: 类型/范围与服务端校验 (与 CLI/固件钳制一致, 双保险)
 PARAM_DEFS = {
     "model":           dict(kind="path",  default=None),
-    "class_id":        dict(kind="int",   lo=0, hi=255, default=0),
+    # 目标类别 -c: 固件**不钳制**它, 负数 = 不筛类别 (见 src/main.cpp 与 core/detect.cpp
+    #   的 want_cls < 0), 模板里写着 CLASS_ID=-1 就是这个用法。故下界是 -1: 把它钳到 0
+    #   会让面板启动 (传 -c 0 = 只留类 0) 与直跑脚本 (不筛类别) 变成两件事 —— 而脚本是
+    #   唯一事实源。上界 255 是标签号的防误输入带。
+    "class_id":        dict(kind="int",   lo=-1, hi=255, default=0),
     "conf":            dict(kind="float", lo=0.0, hi=1.0, default=0.5),
     "y_offset":        dict(kind="float", lo=0.0, hi=100.0, default=65.0),
     # 采集设备 = /dev/videoN (空 = 固件按驱动名解析接收器节点); 帧率不是参数:
@@ -40,7 +44,10 @@ PARAM_DEFS = {
     #   —— 该头的属性数 = 4·reg_max + 类数, 而 reg_max 不是可观测量。上界 1000 是防误输入,
     #   取值带是公开检测数据集的类数量级 (COCO 80, 千级即上限)。
     "class_n":         dict(kind="int",   lo=0, hi=1000, default=0),
-    "max_speed":       dict(kind="float", lo=100.0, hi=20000.0, default=2000.0),
+    # 速度上限 -x 与 FOV 半径 -r 都是**像素量**, 默认值按部署源分辨率 (2560×1440)
+    #   落位: 把 1080p 参考下的推导值 (2000 px/s / 150 px) 按 R = 1440/1080 = 4/3 换算
+    #   (见 AGENTS.md 的 "分辨率规则")
+    "max_speed":       dict(kind="float", lo=100.0, hi=20000.0, default=2667.0),
     # 输出模式 (冷: 它决定整条输出后端, 运行中不可换) 与各模式的设备选择
     "output_mode":     dict(kind="enum",  choices=OUTPUT_MODES, default="hid"),
     "mouse_keyword":   dict(kind="str",   default=""),
@@ -50,7 +57,7 @@ PARAM_DEFS = {
     "pad_dump":        dict(kind="bool",  default=False),
     "aim_key":         dict(kind="enum",  choices=("fire", "ads", "both"), default="both"),
     "aim_enabled":     dict(kind="bool",  default=True),
-    "fov":             dict(kind="float", lo=10.0, hi=1000.0, default=150.0),
+    "fov":             dict(kind="float", lo=10.0, hi=1000.0, default=200.0),
     "preview":         dict(kind="bool",  default=False),
     "capture_enabled": dict(kind="bool",  default=False),
     "cap_fire":        dict(kind="bool",  default=True),
@@ -68,12 +75,16 @@ PARAM_DEFS = {
 #   基线。切换 output_mode 就是整套自动换, 保存/标定回写只落进本模式那一格。
 # 倍率刻度: 整数, 100 = 基线, 与有效灵敏度成反比 (有效灵敏度 = 基线/(倍率/100)),
 #   范围 = 固件 spd_clamp 的夹取带 (防误输入), 有意义的带是 5..2000。
+# 槽默认值是 **75** 而不是 100: 基线是按参考分辨率 (1080p) 定的一把尺, 而部署源是
+#   2560×1440 —— 每度更多的像素意味着游戏的**真实**灵敏度 (px/count) 是参考的 4/3 倍,
+#   倍率与灵敏度成反比, 故默认倍率 = 100/(4/3) = 75 (见 AGENTS.md 的 "分辨率规则";
+#   模板里的同一批默认值与这条推导一致)。
 SPEED_SLOTS = (("spd_x", "SPDX"), ("spd_y", "SPDY"),
                ("ads_spd_x", "ADS_SPDX"), ("ads_spd_y", "ADS_SPDY"))
 for _m in OUTPUT_MODES:
     PARAM_DEFS["l_%s" % _m] = dict(kind="float", lo=0.0, hi=120.0, default=60.0)
     for _a, _v in SPEED_SLOTS:
-        PARAM_DEFS["%s_%s" % (_m, _a)] = dict(kind="int", lo=1, hi=10000, default=100)
+        PARAM_DEFS["%s_%s" % (_m, _a)] = dict(kind="int", lo=1, hi=10000, default=75)
 # 热参数白名单: param key → 固件通道 key (对应 src/io/hotctl.cpp hotctl_thread)。
 #   固件侧的倍率热参只有一套 (spdx/spdy/adsspdx/adsspdy, 作用于运行中实例的当前输出
 #   模式), 所以槽键→线上键的映射按模式取 (mode_spd_keys): 保存 pad 槽而实例跑 hid 时,

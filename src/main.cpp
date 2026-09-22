@@ -139,17 +139,18 @@ int main(int argc, char* argv[]) {
         else if (arg=="-h"||arg=="--help") {
             std::cout<<"用法: "<<argv[0]<<" [自瞄选项] [采集选项]\n"
                 "\n自瞄选项:\n"
-                "  -m <路径>  模型 (.axmodel)  -c <ID> 类别  -n <数> 模型类数\n"
+                "  -m <路径>  模型 (.axmodel)  -c <ID> 目标类别 (-1 = 不筛类别)\n"
+                "  -n <数>    模型类数 (0 = 由属性数自解; 未折叠 DFL 头必须给)\n"
                 "  -t <阈值>  置信度     -y <偏移> 部位\n"
                 "  -d <节点>  采集设备: /dev/videoN (缺省 = 按驱动名解析接收器节点)\n"
                 "  -x <速度>  最大px/s\n"
-                "  -l <L>     初始延迟\n"
+                "  -l <L>     初始环路延迟 (完整回路: 含标定跳过的那条推理腿; 标定回写的就是它)\n"
                 "  -S <脚本>  回写路径 (标定只写本输出模式的延迟 VAR:\n"
                 "             hid → HID_L_EST, pad → PAD_L_EST, p5g → P5G_L_EST)\n"
                 "  -k <键>   fire/ads/both  -v <y/n> 预览\n"
                 "  --spd <x>[,<y>]      拉枪速度倍率逐轴 (默认 100 = 基线; 调大=更快; 热参 spdx/spdy)\n"
                 "  --ads-spd <x>[,<y>]  ADS 键按住时的同一对 (默认 100; 热参 adsspdx/adsspdy)\n"
-                "  -r <半径>  FOV 半径 px (默认 150, 10–1000)\n"
+                "  -r <半径>  FOV 半径 px (默认 200, 10–1000)\n"
                 "  -a <y/n>   鼠标接管 (默认 y; n=纯透传: 不注入, 检测/采集照常)\n"
                 "\n参数说明:\n"
                 "  -n 只在模型的检测头是**未折叠 DFL 头**时需要 (公开 YOLO11 是 80 类):\n"
@@ -194,12 +195,12 @@ int main(int argc, char* argv[]) {
     //   网格头的类数由属性数自解, 缺省 0 = 自解 (见 io/capture.h 的 open)
     int   ncls    =std::stoi(!a_n.empty()?a_n:get_input_with_default("模型类数(0=自解)","0"));
     ncls=std::max(0,ncls);
-    // 交互默认与启动模板/文档同值 (置信度 0.5; 速度上限 2000 = scripts/game/
-    //   template.sh.example 里 MAX_SPEED 的成文推导的落点) — 只交互式跑固件的人与经
-    //   webui/模板启动的人落在同一个工作点上。
+    // 交互默认与启动模板/文档同值 (置信度 0.5; 速度上限 2667 = scripts/game/
+    //   template.sh.example 里 MAX_SPEED 的成文推导在部署源 2560×1440 上的落点) —— 只
+    //   交互式跑固件的人与经 webui/模板启动的人落在同一个工作点上。
     float conf    =std::stof(!a_t.empty()?a_t:get_input_with_default("置信度","0.5"));
     float y_off   =std::stof(!a_y.empty()?a_y:get_input_with_default("Y偏移","65"));
-    float max_spd =std::stof(!a_x.empty()?a_x:get_input_with_default("最大速度","2000"));
+    float max_spd =std::stof(!a_x.empty()?a_x:get_input_with_default("最大速度","2667"));
     max_spd=std::clamp(max_spd,100.0f,20000.0f);
     const float max_v=max_spd/1000.0f;
     float init_l=std::clamp(std::stof(a_l.empty()?"60":a_l),L_MIN,L_MAX);
@@ -258,7 +259,7 @@ int main(int argc, char* argv[]) {
     bool preview=(pv=="y"||pv=="Y");
     if(!preview) unsetenv("DISPLAY");
     jpeg_q=std::clamp(jpeg_q,1,100);
-    float fov_r=std::clamp(std::stof(a_r.empty()?"150":a_r),10.0f,1000.0f);
+    float fov_r=std::clamp(std::stof(a_r.empty()?"200":a_r),10.0f,1000.0f);
 
     // 鼠标接管 (默认开) 与截图源 (默认全开; -e 给出时以该列表为准, 可为空 = 全关)
     bool aim_on=!(a_a=="n"||a_a=="N");

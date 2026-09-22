@@ -52,11 +52,15 @@ timing, so **there is no frame-rate parameter**.
 Aim at a static background with texture, take both hands off the controls and hold both side keys for 5
 seconds (the gamepad modes: L3+R3, or the panel's 「开始标定」 button). The program excites the loop — per
 axis, alternating deflections that stop the moment the picture has travelled far enough, each followed by
-a quiet pause — measures the background motion with block phase correlation, and estimates the **loop
-delay `L` (ms)**, the one calibrated quantity, from three independent readings of that same observation
-stream (a sub-frame-exact tail sum plus two frame-quantized edges). Success is a nod and writes back that
-output mode's delay VAR (`HID_L_EST` for hid, `PAD_L_EST` for pad, `P5G_L_EST` for p5g) into the per-game
-launch script; a failure is a shake that writes nothing and states its reason and evidence in the log. The
+a quiet pause — measures the background motion with block phase correlation, and estimates the **physical
+loop delay `L` (ms)**, the one calibrated quantity, from three independent readings of that same observation
+stream (a sub-frame-exact tail sum plus two frame-quantized edges). The round skips the inference chain, so
+the leg it genuinely bypasses (pack + H2D + exec + D2H + decode, the segment the `[AI FPS]` line reports) is
+accumulated from ordinary frames and **added** on the way out, while the legs the round pays itself — waiting
+for a frame's payload and the RGA crop — are not added again; the written value is therefore the whole loop
+delay, and the round's log states all three numbers. Success is a nod and writes back that output mode's
+delay VAR (`HID_L_EST` for hid, `PAD_L_EST` for pad, `P5G_L_EST` for p5g) into the per-game launch script; a
+failure is a shake that writes nothing and states its reason and evidence in the log. The
 control-law bandwidth is then derived from `L` via phase margin (`wn=(90°−PM)π/180/L`, PM=50°) and the
 per-game speed feel is dialled by four per-axis **pull-speed ratios** (`--spd`, `--ads-spd`: effective
 sensitivity = baseline / (ratio/100), so `100` is the baseline and a larger ratio means a faster pull) —
@@ -68,9 +72,12 @@ point, and the law's proven mismatch envelope is ±30%). Adapts to PC/PS5 and 60
 resolution. Going to a source with `R×` the pixels per degree (for the same field of view, the width
 ratio): `MAX_SPEED` (px/s) and `FOV_RADIUS` (px) scale **up** by `R`, and the pull-speed ratios scale
 **down** by `R` (more pixels per degree means the game's real sensitivity is higher, and a larger ratio
-means "assume a lower sensitivity"). At `R = 4/3` (1080p → 1440p, the deployment signal's relation to the
-derivation's reference): `MAX_SPEED` 2000 → ≈2667 px/s, `FOV_RADIUS` 150 → 200 px, a ratio of 100 → 75;
-`L` and the window side are unchanged. `AGENTS.md`'s Tuning section carries the rule in full.
+means "assume a lower sensitivity" — so a ratio left at its old value makes the firmware emit too many
+counts and the crosshair over-pull). The reference of those derivations is 1080p; **the deployment signal
+is 2560×1440, i.e. `R = 4/3`, and the values this repository ships are the landed ones**: `MAX_SPEED`
+2667 px/s, `FOV_RADIUS` 200 px, the pull-speed ratios 75 — in the launcher template, in the panel's
+defaults and in the firmware's interactive defaults alike; `L` and the window side are unchanged.
+`AGENTS.md`'s Tuning section carries the rule, its worked example and where each number is written down.
 
 ## Control law
 
@@ -117,14 +124,14 @@ reads the guard's effective value, not its literal text.
 | `PAD_KEYWORD` | `-P` | pad/p5g: gamepad match substring (empty = any `*-event-joystick`; the dongle's own node is excluded) |
 | `PAD_TRIG_THR` | `-T` | pad/p5g: trigger threshold in % of full scale, shared by RT and LT; it gates the aim-trigger decision only — the analog value passes through 1:1 (hot param `padthr`) |
 | `PAD_DUMP` | `--pad-dump` | pad/p5g: log the merged logical state every ≥50 ms (injection debugging) |
-| `HID_L_EST` / `PAD_L_EST` / `P5G_L_EST` | `-l` | the calibrated loop delay, **one slot per output mode** — the only quantity the firmware ever writes back (each is hand-editable too) |
-| `HID_SPDX` `HID_SPDY` `HID_ADS_SPDX` `HID_ADS_SPDY` | `--spd` / `--ads-spd` | hid slot: pull-speed ratios, per axis (integer; `100` = baseline, larger = faster, meaningful band `5..2000`) |
+| `HID_L_EST` / `PAD_L_EST` / `P5G_L_EST` | `-l` | the calibrated **complete** loop delay (the round's physical reading plus the averaged inference leg; the frame-wait and RGA legs the round pays itself are not added), **one slot per output mode** — the only quantity the firmware ever writes back (each is hand-editable too) |
+| `HID_SPDX` `HID_SPDY` `HID_ADS_SPDX` `HID_ADS_SPDY` | `--spd` / `--ads-spd` | hid slot: pull-speed ratios, per axis (integer; `100` = baseline, larger = faster, meaningful band `5..2000`; shipped default `75` = the baseline at the 1440p deployment source) |
 | `PAD_SPDX` `PAD_SPDY` `PAD_ADS_SPDX` `PAD_ADS_SPDY` | `--spd` / `--ads-spd` | pad slot: the same four in the gamepad channel's units |
 | `P5G_SPDX` `P5G_SPDY` `P5G_ADS_SPDX` `P5G_ADS_SPDY` | `--spd` / `--ads-spd` | p5g slot: the same four for the PS5 channel |
-| `CLASS_ID` / `CLASS_N` | `-c` / `-n` | target class; model class count (`0` = derive from the attribute count — needed only by an unfolded DFL head, whose `reg_max` is not observable) |
+| `CLASS_ID` / `CLASS_N` | `-c` / `-n` | target class (`-1` = do not filter by class — the firmware does not clamp `-c`, so the panel passes it through as-is); model class count (`0` = derive from the attribute count — needed only by an unfolded DFL head, whose `reg_max` is not observable) |
 | `CONF_THRESH` / `Y_OFFSET` / `CAM_DEV` | `-t` / `-y` / `-d` | confidence, aim height offset, capture device (`/dev/videoN`; empty = resolve the receiver by driver name) |
-| `MAX_SPEED` | `-x` | crosshair speed cap px/s (derivation in the template; rescale with the source resolution) |
-| `AIM_KEY` / `AIM_ENABLED` / `FOV_R` / `PREVIEW` | `-k` / `-a` / `-r` / `-v` | trigger key, mouse takeover, FOV radius, preview |
+| `MAX_SPEED` | `-x` | crosshair speed cap px/s (derivation in the template; a pixel quantity, shipped as 2667 = the 1080p reference's 2000 carried to the 1440p deployment source) |
+| `AIM_KEY` / `AIM_ENABLED` / `FOV_R` / `PREVIEW` | `-k` / `-a` / `-r` / `-v` | trigger key, mouse takeover, FOV radius (also a pixel quantity: shipped as 200 px = the reference's 150 px at 1440p), preview |
 | `CAPTURE` `CAP_FIRE` `CAP_DET` `CAP_AUTO` `OUT_DIR` `FIRE_MS` `AUTO_S` `COOLDOWN_MS` `JPEG_Q` | `-o` `-e` `-F` `-A` `-C` `-q` | training-data collection |
 
 **Each output mode owns a slot of five values** (one delay + four ratios), and switching `OUTPUT_MODE`

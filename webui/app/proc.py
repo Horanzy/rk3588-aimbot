@@ -42,6 +42,9 @@ STDBUF = ("stdbuf", "-oL", "-eL")
 HANDSHAKE_RE = re.compile(r"热参数通道: 127\.0\.0\.1:(\d+)")
 FPS_RE = re.compile(r"\[AI FPS\] (\d+) fps")
 CALIB_RE = re.compile(r"\[标定\] L=([0-9.eE+-]+) ms")
+# 一轮成功会打两条 L= 行: 先是拟合引擎的**物理环路延迟**, 紧接着是采集侧合成的**完整环路
+#   延迟** (物理 + 推理段均值) —— 后者才是回写与运行态生效的那个数, 故后匹配者胜 (卡片的
+#   语义 = "在用的那一格", 与脚本里的值一致)
 # [SAVE] fire  (fire=12 det=3 auto=1 drop=0) — 每张截图一行, 计数是固件的累计值
 SAVE_RE = re.compile(r"\[SAVE\]\s*\S+\s*\(fire=(\d+) det=(\d+) auto=(\d+)")
 STATS_RE = re.compile(r"采集统计: fire=(\d+) det=(\d+) auto=(\d+)")
@@ -86,24 +89,29 @@ def build_argv(root: Path, params: dict, script_path: Path) -> list:
     mode = str(params.get("output_mode") or "hid")
     if mode not in discover.OUTPUT_MODES:
         mode = "hid"
-    slot = lambda a: params.get("%s_%s" % (mode, a), 100)
+    # 缺项兜底一律取 discover.PARAM_DEFS 的默认值 —— 参数默认值只有一个定义点,
+    #   面板命令行不会与参数页/脚本模板悄悄分叉 (parse_script_params 本来就会把每个键
+    #   填成默认值, 这里只是让"没填"与"填了默认"落成同一个数)
+    D = discover.PARAM_DEFS
+    dflt = lambda k: D[k]["default"]
+    slot = lambda a: params.get("%s_%s" % (mode, a), dflt("%s_%s" % (mode, a)))
     model = str(params.get("model") or "")
     model_abs = model if os.path.isabs(model) else str(root / model)
     argv = [str(root / "bin" / "aimbot"),
             "-m", model_abs,
-            "-c", fmt_num(params.get("class_id", 0)),
-            "-n", fmt_num(params.get("class_n", 0)),
-            "-t", fmt_num(params.get("conf", 0.5)),
-            "-y", fmt_num(params.get("y_offset", 65.0)),
+            "-c", fmt_num(params.get("class_id", dflt("class_id"))),
+            "-n", fmt_num(params.get("class_n", dflt("class_n"))),
+            "-t", fmt_num(params.get("conf", dflt("conf"))),
+            "-y", fmt_num(params.get("y_offset", dflt("y_offset"))),
             "-d", str(params.get("cam_dev") or ""),
-            "-x", fmt_num(params.get("max_speed", 2000.0)),
+            "-x", fmt_num(params.get("max_speed", dflt("max_speed"))),
             "-S", str(script_path),
             # 拉枪速度倍率 (逐轴, 100 = 基线) — 与脚本同构地显式给出, 缺省即脚本值
             "--spd", "%d,%d" % (slot("spd_x"), slot("spd_y")),
             "--ads-spd", "%d,%d" % (slot("ads_spd_x"), slot("ads_spd_y")),
-            "-k", str(params.get("aim_key", "both")),
+            "-k", str(params.get("aim_key", dflt("aim_key"))),
             "-a", "y" if params.get("aim_enabled", True) else "n",
-            "-r", fmt_num(params.get("fov", 150.0)),
+            "-r", fmt_num(params.get("fov", dflt("fov"))),
             "-v", "y" if params.get("preview") else "n"]
     # 本模式那一槽的延迟 = 本模式那条标定 VAR (hid → HID_L_EST, pad → PAD_L_EST,
     #   p5g → P5G_L_EST); 缺行缺值时省略 -l, 固件按默认兜底
@@ -337,7 +345,7 @@ class InstanceManager:
         self.steps[0]["status"] = "ok"
         self.steps[0]["detail"] = out[-160:]
         # ② aimbot
-        self.steps[1]["status"] = "running"
+        self._set_step(1, "running", "")
         if self._check_user_stop():
             return
         try:
@@ -345,8 +353,7 @@ class InstanceManager:
                                     stderr=subprocess.STDOUT,
                                     stdin=subprocess.DEVNULL, cwd=str(root))
         except OSError as e:
-            self.steps[1]["status"] = "fail"
-            self.steps[1]["detail"] = str(e)
+            self._set_step(1, "fail", str(e))
             return self._finish_error("无法启动 aimbot: %s" % e)
         with self._lock:
             self._proc = proc
@@ -355,6 +362,17 @@ class InstanceManager:
             self.started_at = time.time()
         self._append_log("✅ aimbot 已启动 (pid %d)" % proc.pid)
         threading.Thread(target=self._pump, args=(proc,), daemon=True).start()
+
+    def _set_step(self, idx: int, status: str, detail: str) -> None:
+        """补写启动序列第 idx 步的结论 (调用方已持锁)。
+
+        steps 会被认领与停止两条收尾路径**整体换掉** (换成单元素表: 那时"启动的第 2 步"
+        这个概念已经不存在), 而 _pump 的收尾与它们在时间上互斥、顺序却不保证 (停止的
+        兜底收尾要等 1s)。所以这里按长度守卫 —— 收尾账目绝不能因为列表换了形状而抛异常:
+        抛掉的是这次运行的退出码与历史, 也就是用户唯一能看到原因的地方。"""
+        if 0 <= idx < len(self.steps):
+            self.steps[idx]["status"] = status
+            self.steps[idx]["detail"] = detail
 
     def _check_user_stop(self) -> bool:
         """启动序列中途被叫停 → 干净回退到 stopped。"""
@@ -375,8 +393,7 @@ class InstanceManager:
             self.error = msg
             self.ended_at = time.time()
             self.abnormal = True
-            self.steps[1]["status"] = "fail"
-            self.steps[1]["detail"] = msg
+            self._set_step(1, "fail", msg)
             self._append_log("✗ " + msg)
 
     def _pump(self, proc: subprocess.Popen) -> None:
@@ -432,15 +449,12 @@ class InstanceManager:
             self.abnormal = (not self._user_stop) and rc != 0
             duration = (self.ended_at - self.started_at) if self.started_at else 0
             if self._user_stop:
-                self.steps[1]["status"] = "ok"
-                self.steps[1]["detail"] = "用户停止 (退出码 %s)" % rc
+                self._set_step(1, "ok", "用户停止 (退出码 %s)" % rc)
             elif rc == 0:
-                self.steps[1]["status"] = "ok"
-                self.steps[1]["detail"] = "正常退出"
+                self._set_step(1, "ok", "正常退出")
             else:
-                self.steps[1]["status"] = "fail"
                 sig = (" (信号 %s)" % self.exit_signal) if self.exit_signal else ""
-                self.steps[1]["detail"] = "异常退出: rc=%s%s" % (rc, sig)
+                self._set_step(1, "fail", "异常退出: rc=%s%s" % (rc, sig))
             self._push_history({
                 "ts": self.ended_at, "profile": self.profile,
                 "display_name": self.display_name,
@@ -470,6 +484,9 @@ class InstanceManager:
             self.state = "exited"
             self.ended_at = time.time()
             self.pid = None
+            # 兜底收尾同时注销进程句柄: 于是 _pump 的收尾 (它判"句柄还是不是自己") 让位,
+            #   两条收尾路径互斥 —— 否则 1s 之后才醒来的 _pump 会往已被换掉的 steps 上写账
+            self._proc = None
             self.exit_code = None
             self.exit_signal = signal.SIGTERM
             self.abnormal = False

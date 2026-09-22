@@ -593,12 +593,22 @@ bool HdmiIn::wait_frame(HdmiFrame* out, std::string* err, HdmiFail* fail) {
             //   消费者比信号慢时这样"交出来的帧"始终贴近当前, 而不是队列头那帧
             HdmiFrame newest{};
             bool have = false;
+            // 取出而不交付的帧在这里归还 (口径见 io/hdmi_in.h 的 HdmiPullFate): 关掉它的
+            //   fence dup + 缓冲回队列。排空循环的每个出口都走这一处 —— 少走一个就是漏一个
+            //   fd (每重建一次会话再漏一个) 加永久少一块缓冲 (块数固定, 少了不会长回来)。
+            //   index < 0 = 这一帧根本没取出来 (DQBUF 报错时 f 没被填), 那时两件事都不做。
+            auto pull_back = [&](HdmiPullFate fate, HdmiFrame& g) {
+                if (!hdmi_pull_requires_giveback(fate)) return;
+                if (g.fence_fd >= 0) { close_fence(g.fence_fd); g.fence_fd = -1; }
+                if (g.index >= 0) queue_buffer(g.index);
+            };
             for (;;) {
                 HdmiFrame f{};
                 uint32_t ts_type = 0;
                 bool err_flag = false;
                 const int r = dequeue(&f, &ts_type, &err_flag, err);
                 if (r < 0) {
+                    if (have) pull_back(HdmiPullFate::Abandoned, newest);
                     set_fail(fail, HdmiFail::Error);
                     return false;
                 }
@@ -606,7 +616,7 @@ bool HdmiIn::wait_frame(HdmiFrame* out, std::string* err, HdmiFail* fail) {
                 if (err_flag) {
                     // 驱动以 VB2_BUF_STATE_ERROR 归还的缓冲 (停流路径) 没有有效载荷
                     ++invalid_;
-                    queue_buffer(f.index);
+                    pull_back(HdmiPullFate::Abandoned, f);
                     continue;
                 }
                 if (!ts_checked_) {
@@ -614,7 +624,8 @@ bool HdmiIn::wait_frame(HdmiFrame* out, std::string* err, HdmiFail* fail) {
                     if (ts_type != V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC) {
                         set_err(err, "该队列的时间戳类型不是 MONOTONIC (flags=0x" + std::to_string(ts_type) +
                                          "), 交付延迟与帧率统计的口径不成立");
-                        queue_buffer(f.index);
+                        pull_back(HdmiPullFate::Abandoned, f);
+                        if (have) pull_back(HdmiPullFate::Abandoned, newest);
                         set_fail(fail, HdmiFail::Error);
                         return false;
                     }
@@ -626,8 +637,7 @@ bool HdmiIn::wait_frame(HdmiFrame* out, std::string* err, HdmiFail* fail) {
                 }
                 if (have) {
                     // 被新帧取代: 当场归还, 它那份 fence 也不再需要 (fd 是内核给的 dup, 得关)
-                    close_fence(newest.fence_fd);
-                    queue_buffer(newest.index);
+                    pull_back(HdmiPullFate::Superseded, newest);
                     ++superseded_;
                 }
                 newest = f;

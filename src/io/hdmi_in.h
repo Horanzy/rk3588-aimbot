@@ -298,6 +298,24 @@ constexpr bool hdmi_fail_needs_rearm(HdmiFail f) {
 // 连续 fence 超时到线 (推导见 HDMI_FENCE_FAIL_MAX): 到线之后在 wait_frame 里就按 Stalled 报
 constexpr bool hdmi_fence_streak_is_loss(int streak) { return streak >= HDMI_FENCE_FAIL_MAX; }
 
+// 已经从队列取出、却最终没交给调用方的帧有几个出口, 归宿只有一个: **关掉它的 dma-fence
+//   dup 并把缓冲归还队列**。
+//   fd 侧: fence 是 DQBUF 时内核给的 dup, 不关就是漏一个 —— 而会话每重建一次就再漏一个,
+//     长跑里它是无界增长的 (每次失锁/停流都是一次重建)。
+//   缓冲侧: 块数是固定的物理量, 少一块不会自己长回来 (驱动自己要求 ≥2 块, 漏掉 3 块之后
+//     连流都起不来)。
+//   三个出口由本函数表达: 交付那一支把帧**连同 fence 的所有权**一起移出 (交付路径上
+//   wait_fence 已经关掉它, 所以交给调用方的帧其 fence_fd 必为 −1); 另两支 —— 被更新的
+//   帧取代 (最新帧语义) 与排空循环中途放弃 (取帧出错 / 时间戳口径不符) —— 都必须当场归还。
+enum class HdmiPullFate {
+    Delivered,    // 交给调用方 (所有权移出, 与归还无关)
+    Superseded,   // 被更新的帧取代 (最新帧语义, io/hdmi_in.h 文件头)
+    Abandoned,    // 排空循环中途放弃 (DQBUF 出错 / 时间戳类型不符)
+};
+constexpr bool hdmi_pull_requires_giveback(HdmiPullFate f) {
+    return f != HdmiPullFate::Delivered;
+}
+
 // 重建节拍: 两次尝试起点之间至少 HDMI_REARM_MIN_MS (出处见该常量)。
 inline bool hdmi_rearm_due(std::chrono::steady_clock::time_point last,
                            std::chrono::steady_clock::time_point now) {

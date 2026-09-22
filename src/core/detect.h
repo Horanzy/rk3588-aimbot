@@ -88,6 +88,19 @@ inline float outVal(const float* o, const OutputLayout& l, int a, int i) {
 }
 struct Detection { float cx,cy,w,h,conf; int class_id; };
 
+// 未折叠 DFL 头的分布长度判据: 头的属性数是 4·reg_max + 类数, 于是"属性数 − 类数配置"
+//   必须落在 {32, 64, 128, …} 上 —— 2 的幂 (桶边界是格长的等分, 级联下采样给出的候选数
+//   也是这个形状) 且 ≥ 32 (= reg_max ≥ 8: 更少的桶谈不上是一条分布, 期望值只剩格长的几
+//   分之一, 而 4·1 = 4 恰是错类数最容易撞上的值)。
+//   为什么不能只查"能被 4 整除": 类数配置错 (-n 少给/多给) 时差常常仍被 4 整除 (例如
+//   attrs 144 − 类数 124 = 20 = 4·5), 于是解码照常进行, 而每条边的分布长度是错的 ——
+//   出来的是**语法合法、数值错的框** (静默给错框, 比不解这一块糟得多)。本判据把它变成
+//   可判的: 不满足就整块跳过, 与"类数未给/步长未知"走同一条出口。
+constexpr int DFL_ATTR_REST_MIN = 32;
+inline bool dfl_bins_ok(int attr_rest) {
+    return attr_rest >= DFL_ATTR_REST_MIN && (attr_rest & (attr_rest - 1)) == 0;
+}
+
 // 解码口径 — 由布局与模型的**物理几何**判定, 判定规则见 detect.cpp
 enum class HeadKind { kEnd2End, kYoloV5, kYoloV8, kYoloDfl };
 HeadKind head_kind(const OutputLayout& l, int num_classes, int input_side);

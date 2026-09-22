@@ -33,7 +33,11 @@ constexpr int    DEFAULT_FREQ    = 1000;
 constexpr const char* DEFAULT_KEYWORD  = "";         // 空 = 任一 *-event-mouse 中字典序首个
 constexpr const char* DEV_SEARCH_PATH  = "/dev/input/by-id/";
 
-const float FOV_RADIUS   = 150.0f;                   // FOV 半径默认值 (px): 目标筛选圈兼积分器边界; 经 -r 或热参 fov 覆盖 (运行时 g_fov_radius)
+// FOV 半径默认值 (px): 目标筛选圈兼积分器边界; 经 -r 或热参 fov 覆盖 (运行时
+//   g_fov_radius)。200 = 1080p 参考下的 150px 按部署源 2560×1440 (R = 4/3) 换算 ——
+//   它是像素量, 与源分辨率绑定 (见 AGENTS.md 的 "分辨率规则"); 上界由窗口给出
+//   (±320px, 对角 ≈452px), 再大没有额外效果。
+const float FOV_RADIUS   = 200.0f;
 const int   HOT_CTL_PORT = 47700;                    // 热参数通道端口 (UDP, 仅绑 127.0.0.1)
 const int   CAP_SIZE     = 640;                      // 最小采集边长 (px): 模型输入更小时也按此尺寸采集, 再居中裁到模型输入
 const float TICK_MS      = 1000.0f / DEFAULT_FREQ;   // 控制拍周期 (ms)
@@ -51,6 +55,11 @@ constexpr int ms_to_ticks(int ms) { return ms * DEFAULT_FREQ / 1000; }
 //   px/count, pad 的基线就是满偏屏幕速度 3000 px/s (COD 实测 30–70% 档
 //   193/556/1159/1651/1804 px/s → 满偏外推 ≈2600, 取 3000; 与速度帽推导
 //   2000 px/s = 960·v/d 同量级)。
+// 两条基线都是**参考分辨率 1080p** (f≈960px, 90°hFOV) 下的值 —— 它们与像素量绑定。
+//   部署源是 2560×1440, 每度像素是参考的 R = 4/3 倍, 游戏的真实灵敏度 (px/count,
+//   px/s 满偏) 同倍更大; 倍率与灵敏度成反比, 故随附的倍率默认值是
+//   100/(4/3) = 75 (脚本模板与参数面同值)。换源分辨率就按同一条规则重算, 见
+//   AGENTS.md 的 "分辨率规则"。
 // 夹取带 [1, 10000] 是防误输入 (0/负数/离谱放大值); 有意义的带是 5..2000 ——
 //   有效灵敏度 s_hid_eff = 100/spd 落在 0.05–20 px/count: 基线 (1 px/count 与
 //   3000 px/s) 两侧各约 1.3 个数量级的修正范围。这是选择规则不是实测带: 游戏侧的

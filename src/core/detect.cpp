@@ -8,6 +8,7 @@
 #include "core/detect.h"
 
 #include <cmath>
+#include <iostream>
 #include <map>
 
 // 解码口径的判定 — 只用**物理结构**, 不用配置的类数:
@@ -64,10 +65,22 @@ std::vector<Detection> decode_outputs(const std::vector<const float*>& bufs,
         if (kind==HeadKind::kYoloDfl) {
             // 类数配置在本支只用来定分布长度: attrs = 4·reg_max + 类数 → reg_max。它
             //   不参与口径判定 (rank 4 已判定)。契约不成立 (类数未给/非正, 步长未知, 或
-            //   剩余通道不是 4 的倍数) 时整块跳过 —— 不猜分布长度, 宁可不解这一块。
+            //   属性数减类数不落在 {32,64,128,…} 上) 时整块跳过 —— 不猜分布长度, 宁可
+            //   不解这一块。判据是 2 的幂而不只是"能被 4 整除" (出处见 detect.h 的
+            //   dfl_bins_ok): 只查整除时类数错一个仍落在整除带上, 解出的框语法合法而数值错。
             if (num_classes<1 || ol.stride<=0) continue;
             const int nb=ol.attrs-num_classes;
-            if (nb<=0 || nb%4) continue;
+            if (!dfl_bins_ok(nb)) {
+                // 现场证据每个属性数报一次 (这一块为什么不解码要能看见)
+                static int warned_attrs = -1;
+                if (warned_attrs != ol.attrs) {
+                    warned_attrs = ol.attrs;
+                    std::cerr << "⚠ DFL 头不解码: 属性数 " << ol.attrs << " − 类数配置 "
+                              << num_classes << " = " << nb << " 不是 4·2^k (k≥3)\n"
+                              << "   未折叠 DFL 头的属性数 = 4·reg_max + 类数, 用 -n 给对类数\n";
+                }
+                continue;
+            }
             const int reg=nb/4;
             for (int i=0;i<ol.num;++i) {
                 const float* p=od+(size_t)i*ol.attrs;      // 属性在最内层 (NHWC)
