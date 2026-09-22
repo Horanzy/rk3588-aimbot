@@ -1,14 +1,25 @@
 // ============================================================================
 //  hdmi_in.cpp — hdmi_in.h 的实现: 裸 V4L2 MULTIPLANAR 取帧 (mmap + EXPBUF),
-//    最新帧语义的交付, timing 锁定门, low_latency 前置位。设计理由与实测口径
-//    全在 io/hdmi_in.h 的头部; 本文件只放"怎么做"。
-//    复现路径 (板端, root): ./build/hdmi_probe 600
+//    最新帧语义的交付, timing 锁定门, low_latency 前置位, 失锁/断流的判定与重建。
+//    设计理由与实测口径全在 io/hdmi_in.h 的头部; 本文件只放"怎么做"。
+//
+//  复现路径 (板端, root):
+//    * 取帧/交付/裁剪对照: ./build/hdmi_probe 600
+//    * 失锁与重建: 给接收器写一份**别的** EDID 会让它落下 HPD, 源随之重新协商 ——
+//        sudo v4l2-ctl -d /dev/video0 --set-edid=pad=0,file=/usr/lib/firmware/edid/1920x1080.bin,format=raw
+//      源切到新模式的瞬间接收器失锁、驱动自己停流; 恢复部署 EDID 的做法见
+//      /usr/local/sbin/hdmirx-set-edid.sh (它开机时把 /usr/local/share/hdmirx/1440p120.edid
+//      写进接收器, 是本机 EDID 的权威来源):
+//        sudo v4l2-ctl -d /dev/video0 --set-edid=pad=0,file=/usr/local/share/hdmirx/1440p120.edid,format=raw
+//      aimbot 侧看 [HDMI] 的重建行与 [AI FPS] 行的增量段 (等 fence/失锁/重建), 探针侧看
+//      build/hdmi_probe 的结果段 (同一批判据与账)。
 // ============================================================================
 
 #include "io/hdmi_in.h"
 
 #include <algorithm>
 #include <cerrno>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <dirent.h>
@@ -150,24 +161,38 @@ bool HdmiIn::set_low_latency(std::string* err) {
         return false;
     }
     low_latency_ = 1;
-    std::printf("[HDMI] 低延迟: low_latency=%s (%s, 驱动在 STREAMON 时读取; 帧完成中断取 line_flag "
-                "且跳过 6 帧预热)\n",
-                after.c_str(), kLowLatencyPath);
+    if (!low_latency_announced_) {   // 重建会重开一次会话, 这句话不必每次重复
+        low_latency_announced_ = true;
+        std::printf("[HDMI] 低延迟: low_latency=%s (%s, 驱动在 STREAMON 时读取; 帧完成中断取 line_flag "
+                    "且跳过 6 帧预热)\n",
+                    after.c_str(), kLowLatencyPath);
+    }
     return true;
 }
 
 // ============================== 等 timing 锁定 ==============================
+bool HdmiIn::query_lock(std::string* err) {
+    if (fd_ < 0) {
+        set_err(err, "设备未打开");
+        return false;
+    }
+    v4l2_dv_timings t;
+    std::memset(&t, 0, sizeof(t));
+    if (xioctl(fd_, VIDIOC_QUERY_DV_TIMINGS, &t) < 0) {
+        set_err(err, errno_text());
+        return false;
+    }
+    timing_ = t.bt;
+    return true;
+}
+
 bool HdmiIn::wait_timing_lock(std::string* err) {
     std::string last;
     for (int waited = 0; waited <= HDMI_LOCK_WAIT_MS; waited += HDMI_LOCK_POLL_MS) {
-        v4l2_dv_timings t;
-        std::memset(&t, 0, sizeof(t));
-        if (xioctl(fd_, VIDIOC_QUERY_DV_TIMINGS, &t) == 0) {
-            timing_ = t.bt;
+        if (query_lock(&last)) {
             std::printf("[HDMI] 时序锁定: %s\n", timing_text().c_str());
             return true;
         }
-        last = errno_text();
         if (waited < HDMI_LOCK_WAIT_MS) usleep(HDMI_LOCK_POLL_MS * 1000);
     }
     set_err(err, "VIDIOC_QUERY_DV_TIMINGS 在 " + std::to_string(HDMI_LOCK_WAIT_MS) +
@@ -190,49 +215,69 @@ bool HdmiIn::queue_buffer(int index) {
     return xioctl(fd_, VIDIOC_QBUF, &b) == 0;
 }
 
-// ============================== 打开 ==============================
+// ============================== 打开 / 重建 ==============================
 bool HdmiIn::open(const std::string& spec, int num_buffers, HdmiDelivery delivery, std::string* err) {
     close();
     delivery_ = delivery;
+    num_buffers_ = num_buffers;
+    spec_ = spec;
     if (num_buffers < HDMI_BUF_MIN || num_buffers > HDMI_BUF_MAX) {
         set_err(err, "缓冲块数 " + std::to_string(num_buffers) + " 超出 [" + std::to_string(HDMI_BUF_MIN) +
                          ", " + std::to_string(HDMI_BUF_MAX) + "]");
         return false;
     }
-
     dev_path_ = resolve_device(spec, err);
     if (dev_path_.empty()) return false;
+    return arm(err);
+}
 
-    // O_NONBLOCK: DQBUF 用非阻塞 + poll 等待 —— 排空队列那一步必须有"现在没有更多了"这个
-    //   明确的返回 (EAGAIN), 阻塞式 DQBUF 表达不了它
-    fd_ = ::open(dev_path_.c_str(), O_RDWR | O_NONBLOCK | O_CLOEXEC);
+// 一次采集会话的建立。设备解析不在这里 (open 解析一次, rearm 复用): 节点号在一次启动内
+//   是稳定的, 跨重启才不稳定 (见 io/hdmi_in.h)。
+bool HdmiIn::arm(std::string* err) {
+    if (dev_path_.empty()) {
+        set_err(err, "没有设备路径 (先 open 一次)");
+        return false;
+    }
     if (fd_ < 0) {
-        set_err(err, "打开 " + dev_path_ + " 失败: " + errno_text());
-        return false;
+        // O_NONBLOCK: DQBUF 用非阻塞 + poll 等待 —— 排空队列那一步必须有"现在没有更多了"
+        //   这个明确的返回 (EAGAIN), 阻塞式 DQBUF 表达不了它
+        fd_ = ::open(dev_path_.c_str(), O_RDWR | O_NONBLOCK | O_CLOEXEC);
+        if (fd_ < 0) {
+            set_err(err, "打开 " + dev_path_ + " 失败: " + errno_text());
+            return false;
+        }
+
+        v4l2_capability cap;
+        std::memset(&cap, 0, sizeof(cap));
+        if (xioctl(fd_, VIDIOC_QUERYCAP, &cap) < 0) {
+            set_err(err, "VIDIOC_QUERYCAP 失败: " + errno_text());
+            close();
+            return false;
+        }
+        driver_ = reinterpret_cast<const char*>(cap.driver);
+        // 名字解析的复核: 节点自述的驱动名也要对得上 (两处一致才认)
+        if (driver_.find(HDMIRX_NAME_SUBSTR) == std::string::npos) {
+            set_err(err, dev_path_ + " 的驱动是 \"" + driver_ + "\", 不含 \"" + HDMIRX_NAME_SUBSTR + "\"");
+            close();
+            return false;
+        }
+        if (!(cap.capabilities & V4L2_CAP_VIDEO_CAPTURE_MPLANE) || !(cap.capabilities & V4L2_CAP_STREAMING)) {
+            set_err(err, dev_path_ + " 不具备 MULTIPLANAR 采集 + 流能力 (capabilities 0x" +
+                           std::to_string(cap.capabilities) + ")");
+            close();
+            return false;
+        }
+        std::printf("[HDMI] 设备 %s (驱动 %s, %s)\n", dev_path_.c_str(), driver_.c_str(),
+                    reinterpret_cast<const char*>(cap.bus_info));
     }
 
-    v4l2_capability cap;
-    std::memset(&cap, 0, sizeof(cap));
-    if (xioctl(fd_, VIDIOC_QUERYCAP, &cap) < 0) {
-        set_err(err, "VIDIOC_QUERYCAP 失败: " + errno_text());
+    // ---- 起流前先确已锁定, 锁定之后才读格式 ----
+    // 顺序是硬的: 缓冲尺寸由**锁定后的**格式导出, 而模式变化会同时改分辨率与帧率
+    // (见 io/hdmi_in.h 的"失锁/断流与重建"); 首次打开与重建共用这一条。
+    if (!wait_timing_lock(err)) {
         close();
         return false;
     }
-    driver_ = reinterpret_cast<const char*>(cap.driver);
-    // 名字解析的复核: 节点自述的驱动名也要对得上 (两处一致才认)
-    if (driver_.find(HDMIRX_NAME_SUBSTR) == std::string::npos) {
-        set_err(err, dev_path_ + " 的驱动是 \"" + driver_ + "\", 不含 \"" + HDMIRX_NAME_SUBSTR + "\"");
-        close();
-        return false;
-    }
-    if (!(cap.capabilities & V4L2_CAP_VIDEO_CAPTURE_MPLANE) || !(cap.capabilities & V4L2_CAP_STREAMING)) {
-        set_err(err, dev_path_ + " 不具备 MULTIPLANAR 采集 + 流能力 (capabilities 0x" +
-                       std::to_string(cap.capabilities) + ")");
-        close();
-        return false;
-    }
-    std::printf("[HDMI] 设备 %s (驱动 %s, %s)\n", dev_path_.c_str(), driver_.c_str(),
-                reinterpret_cast<const char*>(cap.bus_info));
 
     // ---- 格式: 只读, 不设置 (格式由信号决定, S_FMT 对任何别的格式都是 EINVAL) ----
     v4l2_format f;
@@ -292,7 +337,7 @@ bool HdmiIn::open(const std::string& spec, int num_buffers, HdmiDelivery deliver
     // ---- 缓冲: REQBUFS(MMAP) → 逐块 QUERYBUF + mmap + EXPBUF ----
     v4l2_requestbuffers req;
     std::memset(&req, 0, sizeof(req));
-    req.count = (uint32_t)num_buffers;
+    req.count = (uint32_t)num_buffers_;
     req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
     req.memory = V4L2_MEMORY_MMAP;
     if (xioctl(fd_, VIDIOC_REQBUFS, &req) < 0) {
@@ -353,11 +398,6 @@ bool HdmiIn::open(const std::string& spec, int num_buffers, HdmiDelivery deliver
     }
     std::printf("[HDMI] %zu 块缓冲 (MMAP %zuB/块 + EXPBUF dmabuf fd 全部导出)\n", bufs_.size(), bufs_[0].length);
 
-    // ---- 起流: 先确已锁定, 再全部入队, 再 STREAMON ----
-    if (!wait_timing_lock(err)) {
-        close();
-        return false;
-    }
     for (size_t i = 0; i < bufs_.size(); ++i) {
         if (!queue_buffer(bufs_[i].index)) {
             set_err(err, "QBUF(" + std::to_string(i) + ") 失败: " + errno_text());
@@ -376,15 +416,19 @@ bool HdmiIn::open(const std::string& spec, int num_buffers, HdmiDelivery deliver
     return true;
 }
 
-// ============================== 关流 ==============================
-void HdmiIn::close() {
+// 拆掉一次采集会话, 但**留着 fd**: 停流 → 释放缓冲 (munmap → 关 dmabuf → REQBUFS(0))。
+//   流已经死了的时候每一步都可能失败 (驱动自己停过流, 队列也可能已在 error 态), 一律容忍:
+//   这一步的目标是把设备恢复成"没被打开过的样子", 而真正的恢复路径是随后的重新 arm。
+//   万一 REQBUFS(0) 也没成功, 设备关闭时内核照样把缓冲收回 (fd 才是唯一的所有者)。
+void HdmiIn::unstream() {
     if (fd_ >= 0 && streaming_) {
         v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
         xioctl(fd_, VIDIOC_STREAMOFF, &type);
     }
     streaming_ = false;
     hold_index_ = -1;
-    // 顺序: 先停流 (此后驱动不再往缓冲里写), 再解映射, 再关 dmabuf, 最后关设备
+    // 先解映射再释放 (内核要求释放时缓冲没有被映射), dmabuf fd 是内核给的 dup, 一并关掉
+    const bool had_bufs = !bufs_.empty();
     for (HdmiBuffer& b : bufs_) {
         if (b.map) munmap(b.map, b.length);
         if (b.fd >= 0) ::close(b.fd);
@@ -392,10 +436,65 @@ void HdmiIn::close() {
         b.fd = -1;
     }
     bufs_.clear();
-    if (fd_ >= 0) ::close(fd_);
-    fd_ = -1;
+    if (had_bufs && fd_ >= 0) {
+        v4l2_requestbuffers req;
+        std::memset(&req, 0, sizeof(req));
+        req.count = 0;
+        req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+        req.memory = V4L2_MEMORY_MMAP;
+        xioctl(fd_, VIDIOC_REQBUFS, &req);
+    }
     seq_valid_ = false;
     ts_checked_ = false;
+    fence_fail_streak_ = 0;
+}
+
+// ============================== 关流 ==============================
+void HdmiIn::close() {
+    unstream();
+    if (fd_ >= 0) ::close(fd_);
+    fd_ = -1;
+}
+
+// ============================== 重建 ==============================
+// 失锁/断流之后的恢复路径 (判据与顺序见 io/hdmi_in.h 的"失锁/断流与重建")。
+//   失败时设备处于关闭状态, 再调一次就是一次完整的新尝试 —— 调用方按 HDMI_REARM_MIN_MS
+//   的节拍重试, 于是"源还没上电/还在换模式"与"设备真坏了"在行为上一致: 继续等。
+bool HdmiIn::rearm(std::string* err) {
+    const auto t0 = std::chrono::steady_clock::now();
+    const HdmiFormat before = fmt_;
+    const double hz_before = frame_hz();
+
+    if (dev_path_.empty()) {   // open 从未成功过: 把设备解析补上 (rearm 可独立使用)
+        dev_path_ = resolve_device(spec_, err);
+        if (dev_path_.empty()) {
+            ++rearm_fail_;
+            return false;
+        }
+    }
+
+    if (fd_ >= 0) {
+        std::printf("[HDMI] 重建: 拆掉当前会话 (STREAMOFF 容错 → munmap → 关 dmabuf → REQBUFS(0)) "
+                    "并重新打开 %s\n",
+                    dev_path_.c_str());
+        std::fflush(stdout);
+        unstream();
+        ::close(fd_);
+        fd_ = -1;
+    }
+    if (!arm(err)) {          // arm 失败时内部已 close()
+        ++rearm_fail_;
+        return false;
+    }
+    ++rearm_ok_;
+    last_rearm_ms_ = std::chrono::duration<double, std::milli>(
+                         std::chrono::steady_clock::now() - t0).count();
+    std::printf("[HDMI] 重建成功: 恢复耗时 %.0fms — %s, %zu 块缓冲已入队并起流 "
+                "(断流前 %dx%d @ %.2fHz)\n",
+                last_rearm_ms_, timing_text().c_str(), bufs_.size(), before.width, before.height,
+                hz_before);
+    std::fflush(stdout);
+    return true;
 }
 
 HdmiIn::~HdmiIn() { close(); }
@@ -442,12 +541,16 @@ int HdmiIn::dequeue(HdmiFrame* f, uint32_t* ts_type, bool* err_flag, std::string
     return 0;
 }
 
-bool HdmiIn::wait_frame(HdmiFrame* out, std::string* err) {    if (out == nullptr) {
+bool HdmiIn::wait_frame(HdmiFrame* out, std::string* err, HdmiFail* fail) {
+    set_fail(fail, HdmiFail::Ok);
+    if (out == nullptr) {
         set_err(err, "wait_frame: out 为空");
+        set_fail(fail, HdmiFail::Error);
         return false;
     }
     if (!streaming_) {
-        set_err(err, "wait_frame: 未起流");
+        set_err(err, "wait_frame: 未起流 (流断过之后要先 rearm)");
+        set_fail(fail, HdmiFail::NoStream);
         return false;
     }
     // 最新帧语义: 手上那帧在被取代之后才归还 —— 它已经不是"最新"了
@@ -457,96 +560,153 @@ bool HdmiIn::wait_frame(HdmiFrame* out, std::string* err) {    if (out == nullpt
         hold_index_ = -1;
     }
 
-    for (int tries = 0; tries < 3; ++tries) {
+    for (int waited = 0, empty_rounds = 0;;) {
         pollfd p;
         p.fd = fd_;
         p.events = POLLIN;
         p.revents = 0;
-        const int pr = poll(&p, 1, HDMI_POLL_TIMEOUT_MS);
+        const int pr = poll(&p, 1, HDMI_POLL_SLICE_MS);
         if (pr < 0) {
-            set_err(err, std::string("poll 失败: ") + errno_text() + (errno == EINTR ? " (被信号打断)" : ""));
+            if (errno == EINTR) {   // 信号立刻可能到 (退出路径): 不重建, 交给调用方看 global_running
+                set_err(err, "poll 被信号打断");
+                set_fail(fail, HdmiFail::Interrupted);
+                return false;
+            }
+            set_err(err, std::string("poll 失败: ") + errno_text());
+            set_fail(fail, HdmiFail::Error);
             return false;
         }
-        if (pr == 0) {
-            set_err(err, "poll 在 " + std::to_string(HDMI_POLL_TIMEOUT_MS) + "ms 内无帧 (流断了? 信号掉了?)");
-            return false;
-        }
-        if (p.revents & (POLLERR | POLLHUP | POLLNVAL)) {
+        if (pr > 0 && (p.revents & (POLLERR | POLLHUP | POLLNVAL))) {
             char b[64];
             std::snprintf(b, sizeof(b), "0x%x", p.revents);
             set_err(err, std::string("poll 报设备异常 revents=") + b);
+            set_fail(fail, HdmiFail::Error);
             return false;
         }
-
-        // 排空: 只要还有已完成的缓冲就接着取, 只留最新的一帧, 其余当场归还 ——
-        //   消费者比信号慢时这样"交出来的帧"始终贴近当前, 而不是队列头那帧
-        HdmiFrame newest{};
-        bool have = false;
-        for (;;) {
-            HdmiFrame f{};
-            uint32_t ts_type = 0;
-            bool err_flag = false;
-            const int r = dequeue(&f, &ts_type, &err_flag, err);
-            if (r < 0) return false;
-            if (r == 1) break;
-            if (err_flag) {
-                // 驱动以 VB2_BUF_STATE_ERROR 归还的缓冲 (停流路径) 没有有效载荷
-                ++invalid_;
-                queue_buffer(f.index);
-                continue;
-            }
-            if (!ts_checked_) {
-                ts_checked_ = true;
-                if (ts_type != V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC) {
-                    set_err(err, "该队列的时间戳类型不是 MONOTONIC (flags=0x" + std::to_string(ts_type) +
-                                     "), 交付延迟与帧率统计的口径不成立");
-                    queue_buffer(f.index);
+        if (pr > 0) {
+            // 排空: 只要还有已完成的缓冲就接着取, 只留最新的一帧, 其余当场归还 ——
+            //   消费者比信号慢时这样"交出来的帧"始终贴近当前, 而不是队列头那帧
+            HdmiFrame newest{};
+            bool have = false;
+            for (;;) {
+                HdmiFrame f{};
+                uint32_t ts_type = 0;
+                bool err_flag = false;
+                const int r = dequeue(&f, &ts_type, &err_flag, err);
+                if (r < 0) {
+                    set_fail(fail, HdmiFail::Error);
                     return false;
                 }
-                std::printf("[HDMI] 时间戳基准 = CLOCK_MONOTONIC (队列声明 V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC)\n");
+                if (r == 1) break;
+                if (err_flag) {
+                    // 驱动以 VB2_BUF_STATE_ERROR 归还的缓冲 (停流路径) 没有有效载荷
+                    ++invalid_;
+                    queue_buffer(f.index);
+                    continue;
+                }
+                if (!ts_checked_) {
+                    ts_checked_ = true;
+                    if (ts_type != V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC) {
+                        set_err(err, "该队列的时间戳类型不是 MONOTONIC (flags=0x" + std::to_string(ts_type) +
+                                         "), 交付延迟与帧率统计的口径不成立");
+                        queue_buffer(f.index);
+                        set_fail(fail, HdmiFail::Error);
+                        return false;
+                    }
+                    if (!ts_announced_) {
+                        ts_announced_ = true;
+                        std::printf("[HDMI] 时间戳基准 = CLOCK_MONOTONIC (队列声明 "
+                                    "V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC)\n");
+                    }
+                }
+                if (have) {
+                    // 被新帧取代: 当场归还, 它那份 fence 也不再需要 (fd 是内核给的 dup, 得关)
+                    close_fence(newest.fence_fd);
+                    queue_buffer(newest.index);
+                    ++superseded_;
+                }
+                newest = f;
+                have = true;
+                if (delivery_ == HdmiDelivery::QueueOrder) break;  // 对照路径: 一次只取一帧
             }
-            if (have) {
-                // 被新帧取代: 当场归还, 它那份 fence 也不再需要 (fd 是内核给的 dup, 得关)
-                close_fence(newest.fence_fd);
+            if (!have) {
+                // poll 说有帧却一帧都取不到: 再来一轮 (队列状态与 poll 不一致, 有界重试)
+                if (++empty_rounds > 3) {
+                    set_err(err, "poll 连续返回可读但 DQBUF 取不到帧");
+                    set_fail(fail, HdmiFail::Error);
+                    return false;
+                }
+                continue;
+            }
+
+            // 序号缺口 = 驱动少交付的帧 (队列空时驱动按 drop the frame! 丢帧, 不重发旧帧)
+            if (seq_valid_) {
+                const uint32_t d = newest.sequence - last_seq_;
+                if (d > 1) lost_ += (d - 1);
+            }
+            seq_valid_ = true;
+            last_seq_ = newest.sequence;
+
+            // 载荷写完的凭据 = fence (见 io/hdmi_in.h): 等不到就不交出去 —— 半张画面进了下游
+            //   比这里报错糟得多 (标定会把"还在写的那几行"当成真实位移)。
+            //   **但缓冲必须当场归还**: 驱动的丢帧路径 (line_flag 中断里找不到下一个缓冲就
+            //   drop the frame!, 不重发旧帧) 会给该缓冲留下一个永不再 signal 的 fence, 于是
+            //   慢消费者跑长一点就必然遇到它; 不归还是永久少一块 —— 4 块里漏 3 块之后驱动就
+            //   再没有缓冲可写 (它自己要求 ≥2 块), 流从此一帧都没有 (长跑实测: 前 3 次超时
+            //   都还活着, 第 4 次之后 poll 再也不返回)。归还的是一块过了时限的旧帧, 内容本来
+            //   就要丢。
+            if (!wait_fence(newest.fence_fd, err)) {
+                newest.fence_fd = -1;      // wait_fence 两条路都已关掉这个内核给的 dup
                 queue_buffer(newest.index);
-                ++superseded_;
+                const std::string fence_err = err ? *err : std::string("帧的 dma-fence 没有 signal");
+                ++fence_fail_streak_;
+                // 载荷没写完这件事本身有三种去向 (判据与出处见 io/hdmi_in.h): 接收器已经不在
+                //   锁上 = 断流的第一个症状 (不必等下一帧); 锁定但连续到线 = 流不产数据;
+                //   否则就是丢了一帧 (驱动的下一次 DQBUF 会把上一根 fence signal 掉)。
+                std::string lerr;
+                if (!query_lock(&lerr)) {
+                    ++lock_lost_;
+                    set_err(err, fence_err + " — 且接收器未锁定 (" + lerr + "): 断流, 需要重建");
+                    set_fail(fail, HdmiFail::LockLost);
+                } else if (hdmi_fence_streak_is_loss(fence_fail_streak_)) {
+                    ++stalled_;
+                    set_err(err, fence_err + " — 连续 " + std::to_string(fence_fail_streak_) +
+                                     " 帧如此而接收器仍锁定: 流不产数据, 需要重建");
+                    set_fail(fail, HdmiFail::Stalled);
+                } else {
+                    set_fail(fail, HdmiFail::Fence);
+                }
+                return false;
             }
-            newest = f;
-            have = true;
-            if (delivery_ == HdmiDelivery::QueueOrder) break;  // 对照路径: 一次只取一帧
-        }
-        if (!have) continue;  // poll 说有帧却取不到: 再来一轮 (最多 3 轮)
+            newest.fence_fd = -1;   // 已关, 不留给调用方
+            fence_fail_streak_ = 0;
 
-        // 序号缺口 = 驱动少交付的帧 (队列空时驱动按 drop the frame! 丢帧, 不重发旧帧)
-        if (seq_valid_) {
-            const uint32_t d = newest.sequence - last_seq_;
-            if (d > 1) lost_ += (d - 1);
+            hold_index_ = newest.index;
+            ++delivered_;
+            *out = newest;
+            return true;
         }
-        seq_valid_ = true;
-        last_seq_ = newest.sequence;
 
-        // 载荷写完的凭据 = fence (见 io/hdmi_in.h): 等不到就不交出去 —— 半张画面进了下游
-        //   比这里报错糟得多 (标定会把"还在写的那几行"当成真实位移)。
-        //   **但缓冲必须当场归还**: 驱动的丢帧路径 (line_flag 中断里找不到下一个缓冲就
-        //   drop the frame!, 不重发旧帧) 会给该缓冲留下一个永不再 signal 的 fence, 于是
-        //   慢消费者跑长一点就必然遇到它; 不归还是永久少一块 —— 4 块里漏 3 块之后驱动就
-        //   再没有缓冲可写 (它自己要求 ≥2 块), 流从此一帧都没有 (长跑实测: 前 3 次超时
-        //   都还活着, 第 4 次之后 poll 再也不返回)。归还的是一块过了时限的旧帧, 内容本来
-        //   就要丢。
-        if (!wait_fence(newest.fence_fd, err)) {
-            newest.fence_fd = -1;      // wait_fence 两条路都已关掉这个内核给的 dup
-            queue_buffer(newest.index);
+        // 本片内没有帧: 先问接收器还在不在锁上 —— "信号掉了"只有这一个快速可观测量
+        //   (见 io/hdmi_in.h)。它失败就是断流, 察觉延迟上限 = 一片而不是整个预算。
+        waited += HDMI_POLL_SLICE_MS;
+        std::string lerr;
+        if (!query_lock(&lerr)) {
+            ++lock_lost_;
+            set_err(err, "poll " + std::to_string(HDMI_POLL_SLICE_MS) + "ms 内无帧且接收器未锁定 (" +
+                             lerr + "): 信号/流断了, 需要重建");
+            set_fail(fail, HdmiFail::LockLost);
             return false;
         }
-        newest.fence_fd = -1;   // 已关, 不留给调用方
-
-        hold_index_ = newest.index;
-        ++delivered_;
-        *out = newest;
-        return true;
+        if (waited >= HDMI_POLL_TIMEOUT_MS) {
+            ++stalled_;
+            set_err(err, "poll 在 " + std::to_string(HDMI_POLL_TIMEOUT_MS) +
+                             "ms 内无帧而接收器仍锁定: 流在驱动侧停了 (或缓冲被消费者占死), "
+                             "需要重建 —— 不是消费者落后 (消费者落后表现为序号缺口, 不表现为无帧)");
+            set_fail(fail, HdmiFail::Stalled);
+            return false;
+        }
     }
-    set_err(err, "poll 连续返回可读但 DQBUF 取不到帧");
-    return false;
 }
 
 // 等 fence: sync_file 的 poll 在 fence signal 时返回 POLLIN, 未 signal 时挂回调等唤醒 ——
@@ -575,6 +735,11 @@ bool HdmiIn::wait_fence(int fd, std::string* err) {
         const int pr = poll(&p, 1, HDMI_FENCE_WAIT_MS);
         if (pr > 0 && (p.revents & POLLIN)) {
             last_fence_wait_us_ = (double)(now_us() - t0);
+            // 账只记**成功的**等待: 超时那几次烧掉的恰好是上限 (poll 到点才返回, 实测
+            //   40038–40081µs), 与成功的分布混在一起就再也看不出上限该多大 (见
+            //   HDMI_FENCE_WAIT_MS 的选择规则)。
+            fence_wait_us_sum_ += last_fence_wait_us_;
+            if (last_fence_wait_us_ > fence_wait_us_max_) fence_wait_us_max_ = last_fence_wait_us_;
             close_fence(fd);
             return true;
         }
@@ -586,6 +751,8 @@ bool HdmiIn::wait_fence(int fd, std::string* err) {
             return false;
         }
         if (pr < 0 && errno == EINTR) continue;  // 信号打断: 继续等 (上限就是这条 poll 的超时)
+        ++fence_timeouts_;
+        last_fence_wait_us_ = (double)(now_us() - t0);
         set_err(err, pr == 0 ? ("帧的 dma-fence 在 " + std::to_string(HDMI_FENCE_WAIT_MS) +
                                 "ms 内没有 signal (载荷没写完; 低延迟模式下属异常)")
                              : (std::string("poll dma-fence 失败: ") + errno_text()));

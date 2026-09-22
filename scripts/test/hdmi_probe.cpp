@@ -12,6 +12,12 @@
 //      (自检那行会读到几百字节变化; 生产路径禁止关, 理由见 io/hdmi_in.h)
 //    * --dump <目录>: PNG 落盘位置 (缺省 /tmp)
 //
+//  失锁/断流: 探针按与生产路径同一条判据取帧 (io/hdmi_in.h 的 HdmiFail), 且**与生产路径
+//   一样重建而不是退出** —— 判为流断了就 rearm() 并接着数帧 (只是丢帧这样的失败仍然报出
+//   来)。这样一次探针长跑本身就是"失锁→重锁→画面回来"的验收: 给接收器写别的 EDID 即可
+//   现场制造失锁 (复现命令见 io/hdmi_in.cpp 头部), 结果段里的失锁/停流/重建成败与 fence
+//   超时是同一批账。
+//
 //  每段数字的定义与它为何这样定义 (不含糊其辞是这条链路的要求):
 //    * 实测帧率 = 相邻两帧 buf.timestamp 之差 (驱动填的 CLOCK_MONOTONIC), 不是
 //      "墙钟/帧数" —— 后者把探针自己的等待也算进去, 测不出信号的真实节拍。
@@ -207,8 +213,18 @@ int main(int argc, char** argv) {
 
     while (!g_stop && n < frames) {
         HdmiFrame fr;
-        if (!cap.wait_frame(&fr, &err)) {
+        HdmiFail fail = HdmiFail::Ok;
+        if (!cap.wait_frame(&fr, &err, &fail)) {
             std::fprintf(stderr, "❌ 取帧失败: %s\n", err.c_str());
+            // 与生产路径同一条恢复动作: 流断了就重建, 不是丢掉整条链 (判定见 io/hdmi_in.h)
+            if (hdmi_fail_needs_rearm(fail) && !g_stop) {
+                std::fprintf(stderr, "   → 重建 (失锁/断流) …\n");
+                if (!cap.rearm(&err)) {
+                    std::fprintf(stderr, "   ❌ 重建失败: %s\n", err.c_str());
+                    break;
+                }
+                continue;
+            }
             break;
         }
         ++n;
@@ -403,6 +419,21 @@ int main(int argc, char** argv) {
     std::printf("  丢弃 (最新帧语义) %llu | 驱动丢帧 (sequence 缺口) %llu | 驱动 ERROR 归还 %llu\n",
                 (unsigned long long)sup_end, (unsigned long long)lost_end,
                 (unsigned long long)inv_end);
+    // 断流的账 (口径见 io/hdmi_in.h): fence 超时那几次烧掉的就是上限, 与成功的等待分开报
+    const uint64_t f_waits = cap.fence_waits(), f_to = cap.fence_timeouts();
+    std::printf("  等 fence %llu 次 (成功 %llu 次, 均值 %.2fms, 最长 %.2fms) | fence 超时 %llu 次 "
+                "(白等 %.0fms = %llu×%dms)\n",
+                (unsigned long long)f_waits, (unsigned long long)(f_waits - f_to),
+                f_waits > f_to ? cap.fence_wait_us_sum() / (double)(f_waits - f_to) / 1000.0 : 0.0,
+                cap.fence_wait_us_max() / 1000.0, (unsigned long long)f_to,
+                (double)f_to * (double)HDMI_FENCE_WAIT_MS, (unsigned long long)f_to,
+                HDMI_FENCE_WAIT_MS);
+    std::printf("  失锁 %llu 次 | 停流 %llu 次 | 重建 %llu 成功 %llu 失败%s\n",
+                (unsigned long long)cap.lock_lost(), (unsigned long long)cap.stalled(),
+                (unsigned long long)cap.rearm_ok(), (unsigned long long)cap.rearm_fail(),
+                cap.rearm_ok() ? (" (末次恢复耗时 " + std::to_string((long)cap.last_rearm_ms()) +
+                                  "ms, 当前 " + cap.timing_text() + ")").c_str()
+                               : "");
     if (diff_rgb >= 0) {
         std::printf("  逐字节对照: 640 RGB %ld 差异 | 640 BGR %ld 差异 | 320 RGB %ld 差异 (期望全 0)",
                     diff_rgb, diff_bgr, diff_320);

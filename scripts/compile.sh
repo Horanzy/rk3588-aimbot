@@ -83,6 +83,15 @@ $CXX -c "$SRC/core/detect_test.cpp" $CXX_FLAGS $INCLUDES -o "$BUILD/detect_test.
 $CXX "$BUILD/detect_test.o" $TEST_OBJS $LIBS $OCV $PTHREAD -o "$BUILD/detect_test"
 "$BUILD/detect_test"
 
+# 取帧层单测 (失败去向: 哪些要重建/哪些只是丢帧 / 连续 fence 超时的判定线 = 队列块数−1 /
+#   重建节拍 / 常量的推导关系): 同一链接方式, 断言失败即终止整个编译。它不碰设备 ——
+#   真机的失锁→重锁→画面回来由 scripts/test/hdmi_probe 与 aimbot 的 [HDMI] 行验收。
+# shellcheck disable=SC2086
+$CXX -c "$SRC/io/hdmi_test.cpp" $CXX_FLAGS $INCLUDES -o "$BUILD/hdmi_test.o"
+# shellcheck disable=SC2086
+$CXX "$BUILD/hdmi_test.o" $TEST_OBJS $LIBS $OCV $PTHREAD -o "$BUILD/hdmi_test"
+"$BUILD/hdmi_test"
+
 # HDMI IN 采集探针 (板端验收工具, 不是单测): 裸 V4L2 取帧 + RGA 裁剪/格式 + 与 mmap
 #   采集缓冲的逐字节 CPU 对照 + 各阶段 PNG。同一链接方式 (除 main.o 外的模块对象);
 #   它需要活动信号与 root, 故只构建不执行 —— 运行: sudo ./build/hdmi_probe 600
@@ -108,4 +117,4 @@ $CXX -c "$ROOT/scripts/test/pipeline_probe.cpp" $CXX_FLAGS $INCLUDES -o "$BUILD/
 # shellcheck disable=SC2086
 $CXX "$BUILD/pipeline_probe.o" $TEST_OBJS $LIBS $OCV $PTHREAD -o "$BUILD/pipeline_probe"
 
-echo "✅ 编译完成 (bin/aimbot + 可移植集 + 四个单测 + 采集探针 + NPU 探针 + 端到端探针) → $BUILD"
+echo "✅ 编译完成 (bin/aimbot + 可移植集 + 五个单测 + 采集探针 + NPU 探针 + 端到端探针) → $BUILD"

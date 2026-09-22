@@ -195,27 +195,57 @@ void ai_thread(std::string model_path, int target_cls, int num_classes,
                int cooldown_ms, int jpeg_quality) {
     const bool collecting_enabled = !out_dir.empty();
 
-    // ---- 接收器: 格式/时序/低延迟都由取帧层定 (io/hdmi_in.h), 这里只读它的自述 ----
+    // ---- 接收器: 首次打开与失锁后的重建走同一条路 (判定与顺序见 io/hdmi_in.h) ----
+    // 打不开**不结束进程**: 源没上电/还没锁/刚在换模式都会走到这里, 而进程活着才能等到
+    //   画面回来 (接收器会失锁并让驱动自己停流, 那时唯一的恢复动作是重建, 不是退出)。
     HdmiIn in;
-    std::string err;
-    if (!in.open(cam_dev, HDMI_BUF_DEFAULT, HdmiDelivery::Newest, &err)) {
-        std::cerr << "AI: 打开接收器失败: " << err << "\n";
-        global_running = false;
-        return;
-    }
-    if (in.frame_hz() > 0) g_src_fps.store((float)in.frame_hz());
-    const double src_hz = src_fps();
-    const HdmiFormat& fmt = in.format();
-
     CapturePipeline pipe;
-    if (!pipe.open(model_path, num_classes, std::min(fmt.width, fmt.height), &err)) {
-        std::cerr << "AI: " << err << "\n";
-        global_running = false;
-        return;
-    }
-    std::cout << "✅ 采集线程已启动 (" << fmt.width << "x" << fmt.height << " @ " << src_hz
-              << "Hz " << HdmiIn::fourcc_name(fmt.fourcc) << ", 窗口 " << pipe.window_side()
-              << ", 模型输入 " << pipe.model_side() << ", " << cam_dev << ")\n";
+    std::string err;
+    if (!in.open(cam_dev, HDMI_BUF_DEFAULT, HdmiDelivery::Newest, &err))
+        std::cerr << "[HDMI] 打开接收器失败: " << err << " (按 HDMI_REARM_MIN_MS 的节拍重试)\n";
+    auto   t_src_try = std::chrono::steady_clock::now() - std::chrono::hours(1);
+    int    src_attempts = 0;
+    int    src_side = 0;                 // 上一次建推理链时的源短边 (模式变化要重建)
+    double src_hz = src_fps();
+
+    // 取源 + 按源几何建/重建推理链。失败即返回 false, 由调用方等下一个节拍 —— 信号一侧
+    //   永不结束进程; 唯一的例外是**从未建起来过**的推理链 (模型打不开/窗口比源还大),
+    //   那是配置事实, 与原来一样立刻结束。
+    auto ensure_source = [&]() -> bool {
+        if (!in.opened() && !in.rearm(&err)) {
+            std::cerr << "[HDMI] 取源失败 (第 " << ++src_attempts << " 次): " << err
+                      << " (按 " << HDMI_REARM_MIN_MS << "ms 节拍重试)\n";
+            return false;
+        }
+        src_attempts = 0;
+        t_src_try = std::chrono::steady_clock::now() - std::chrono::hours(1);  // 恢复即清节拍
+        const HdmiFormat& f = in.format();
+        if (in.frame_hz() > 0) g_src_fps.store((float)in.frame_hz());
+        src_hz = src_fps();     // 模式变了帧率也变 (控制拍的帧长尺度每拍现读 src_fps)
+        if (!pipe.ready() || std::min(f.width, f.height) != src_side) {
+            // 源模式变了就重建推理链: 规范窗口是源的**中心 1:1 裁剪**, 新源短边装不下它
+            //   时只能等源换回来 (进程照常活着, "按节拍再试一次"本身就是那条恢复路径)。
+            if (!pipe.open(model_path, num_classes, std::min(f.width, f.height), &err)) {
+                if (src_side == 0) {          // 从未建起来过: 配置错误, 立刻结束 (输入本身的问题)
+                    std::cerr << "AI: " << err << "\n";
+                    global_running = false;
+                } else {
+                    std::cerr << "AI: 源 " << f.width << "x" << f.height << " 下建推理链失败: "
+                              << err << "\n  (等源换回可裁剪的模式; 进程不退出)\n";
+                    in.close();               // 连源一起收回: 下一个节拍整条路重来
+                }
+                return false;
+            }
+            src_side = std::min(f.width, f.height);
+            std::cout << "✅ 采集线程已启动 (" << f.width << "x" << f.height << " @ " << src_hz
+                      << "Hz " << HdmiIn::fourcc_name(f.fourcc) << ", 窗口 " << pipe.window_side()
+                      << ", 模型输入 " << pipe.model_side() << ", " << cam_dev << ")\n";
+            std::cout.flush();
+        }
+        return true;
+    };
+    if (!ensure_source() && !global_running) return;   // 推理链建不起来: 与原来一样结束这一支
+
     // 预览要有窗口系统 (见 has_display): 没有就把预览关掉并说清原因, 让整条链照常跑 ——
     //   调试视图是附加物, 不该因为启动它的会话没有 DISPLAY 而带走采集/推理/控制。
     if (preview && !has_display()) {
@@ -245,6 +275,8 @@ void ai_thread(std::string model_path, int target_cls, int num_classes,
     long collect_frames = 0, collect_samples = 0;
     double collect_ms = 0.0;                // 采样本身的累计耗时 (每帧成本实测)
     auto cal_t0 = std::chrono::steady_clock::now();
+    // 采样窗深度按打开时的帧率取 (帧数口径); 源模式变了帧率也变, 但只可能变小 (120→60),
+    //   于是深度是超集 —— 模式变化本来就会清掉历史 (见循环里的重建分支), 不必重算。
     const size_t hist_max =
         (size_t)std::max(60, cal_hist_frames(cal_mode, (int)std::lround(src_hz)));
 
@@ -266,19 +298,76 @@ void ai_thread(std::string model_path, int target_cls, int num_classes,
     std::vector<double> ages;               // 本窗口的帧龄 (帧时间戳 → 检测就绪, ms)
     auto fps_t0 = std::chrono::steady_clock::now();
 
-    int read_fails = 0;
+    // 取帧层自己的账: 每 60s 报的是**本窗口的增量** (累计值在"收帧统计:"里), 而"断流一次
+    //   到底花了多少"只有这一处的四个量能回答 —— 等 fence 的次数与其中等到超时的次数,
+    //   以及失锁/停在原地的判定次数与重建的成败次数 (口径与出处见 io/hdmi_in.h)。
+    struct SrcCounters {
+        uint64_t fence_waits = 0, fence_timeouts = 0, lock_lost = 0, stalled = 0, rearm_ok = 0,
+                 rearm_fail = 0;
+        double   fence_us_sum = 0.0;
+    };
+    auto snap_src = [&]() {
+        SrcCounters c;
+        c.fence_waits = in.fence_waits();
+        c.fence_timeouts = in.fence_timeouts();
+        c.fence_us_sum = in.fence_wait_us_sum();
+        c.lock_lost = in.lock_lost();
+        c.stalled = in.stalled();
+        c.rearm_ok = in.rearm_ok();
+        c.rearm_fail = in.rearm_fail();
+        return c;
+    };
+    SrcCounters src_prev = snap_src();
+
     while (global_running) {
+        const auto t_loop = std::chrono::steady_clock::now();
+
+        // ---- 取源: 失锁/断流之后在这里重建, 按 HDMI_REARM_MIN_MS 的节拍重试 (见 io/hdmi_in.h) ----
+        if (!in.opened()) {
+            // 断流期间的标定请求: 采样侧拿不到画面, 这一轮量不出任何东西 —— 一次消费即清并按
+            //   失败回执 (状态机随即摇头收尾), 绝不回写编造的值。
+            if (g_calib_request.exchange(false)) {
+                std::cout << "[标定] 无法测量: 采集断流 (重建中, 本轮无画面) — 未回写\n";
+                std::cout.flush();
+                g_calib_done.store(2);
+            }
+            if (!hdmi_rearm_due(t_src_try, t_loop)) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                continue;
+            }
+            t_src_try = std::chrono::steady_clock::now();
+            if (!ensure_source()) {
+                if (!global_running) break;     // 从未建起来过的推理链: 配置错误, 与原来一样结束
+                continue;
+            }
+            // 重建之后: 相关域的前一帧属于上一个会话 (跨了一次断流), 采样历史同理 ——
+            //   这一轮标定因此作废 (按"无样本"如实失败), 由操作者重来。
+            prev_dom.release();
+            was_collecting = false;
+        }
+
         HdmiFrame f;
         const auto t_wait0 = std::chrono::steady_clock::now();
-        if (!in.wait_frame(&f, &err)) {
-            // 取帧断了就没有画面: 报错退出比带着"没有目标的运行中"状态继续跑更安全
+        HdmiFail fail = HdmiFail::Ok;
+        if (!in.wait_frame(&f, &err, &fail)) {
+            if (fail == HdmiFail::Interrupted) {
+                // 退出信号 (Ctrl+C/停机): 与流无关, 不重建也不当丢帧
+                if (!global_running) break;
+                continue;
+            }
+            // 取帧失败只有两种去向 (判据见 io/hdmi_in.h): 单次 fence 超时是丢了一帧, 下一帧
+            //   照取 (驱动的下一次 DQBUF 会自行把上一根 fence signal 掉); 其余一律拆掉重建 ——
+            //   重建是唯一能让画面回来的动作, 而"退出"会让整条链陪着一次失锁一起死。
             std::cerr << "AI: 取帧失败: " << err << "\n";
-            if (++read_fails > 30) { std::cerr << "AI: 接收器连续 30 帧无帧 → 退出\n";
-                                     global_running = false; break; }
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            if (hdmi_fail_needs_rearm(fail)) {
+                std::cerr << "[HDMI] 按上面的原因拆掉会话, 重建采集 (已交付 " << in.delivered()
+                          << " 帧; 期间发布的目标自然过期, 恢复后第一次检测经既有跳变门重锁)\n";
+                in.close();     // 拆掉会话: 下一轮从取源开始 (含节拍)
+            } else {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
             continue;
         }
-        read_fails = 0;
         const auto now = std::chrono::steady_clock::now();
         const double wait_ms = elapsed_ms(now, t_wait0);
         const float conf_thr = g_conf_thr.load(), y_off_pct = g_y_off_pct.load(),
@@ -335,19 +424,38 @@ void ai_thread(std::string model_path, int target_cls, int num_classes,
             const double win_s = elapsed_ms(now, fps_t0) / 1000.0;
             if (win_s >= 60.0) {
                 const double n = std::max(1.0, (double)fps_cnt) * 1000.0;   // 各段累计是 µs
+                // 取帧层的增量账: 等 fence 的次数与其中等到超时的次数 (超时那几次烧掉的
+                //   就是上限 —— 账见 io/hdmi_in.h 的 HDMI_FENCE_WAIT_MS), 以及失锁/停流
+                //   的判定次数与重建成败。稳态下这四项全 0, 有值就是这一分钟里发生过什么。
+                const SrcCounters sc = snap_src();
+                const uint64_t d_waits = sc.fence_waits - src_prev.fence_waits;
+                const uint64_t d_to = sc.fence_timeouts - src_prev.fence_timeouts;
+                const double d_us = sc.fence_us_sum - src_prev.fence_us_sum;
                 printf("[AI FPS] %d fps (源 %.2fHz, 窗口 %.1fs) | 取帧 %.2fms (其中等 fence "
                        "%.2f) | RGA %.2fms | NPU %.2fms (pack %.2f H2D %.2f exec %.2f D2H "
                        "%.2f 解码 %.2f) | 合计 %.2fms/帧 | 帧龄(帧时间戳→检测就绪) p50 %.1f "
-                       "p99 %.1f max %.1fms\n",
+                       "p99 %.1f max %.1fms | 等 fence %llu 次 (成功 %llu 次 均值 %.2fms, "
+                       "超时 %llu 次 = 白等 %llu×%dms) | 失锁 %llu 次 停流 %llu 次 | 重建 "
+                       "%llu 成功 %llu 失败\n",
                        (int)((double)fps_cnt / win_s), src_hz, win_s, sum_wait / n,
                        sum_fence / n, sum_rga / n, sum_npu / n, sum_pack / n, sum_h2d / n,
                        sum_exec / n, sum_d2h / n, sum_dec / n,
                        (sum_wait + sum_rga + sum_npu) / n, pct(ages, 50), pct(ages, 99),
-                       ages.empty() ? 0.0 : *std::max_element(ages.begin(), ages.end()));
+                       ages.empty() ? 0.0 : *std::max_element(ages.begin(), ages.end()),
+                       (unsigned long long)d_waits,
+                       (unsigned long long)(d_waits - d_to),
+                       d_waits > d_to ? d_us / (double)(d_waits - d_to) : 0.0,
+                       (unsigned long long)d_to, (unsigned long long)d_to,
+                       HDMI_FENCE_WAIT_MS,
+                       (unsigned long long)(sc.lock_lost - src_prev.lock_lost),
+                       (unsigned long long)(sc.stalled - src_prev.stalled),
+                       (unsigned long long)(sc.rearm_ok - src_prev.rearm_ok),
+                       (unsigned long long)(sc.rearm_fail - src_prev.rearm_fail));
                 fflush(stdout);
                 fps_cnt = 0; sum_rga = sum_npu = sum_pack = sum_h2d = sum_exec = sum_d2h
                     = sum_dec = sum_wait = sum_fence = 0;
                 ages.clear(); fps_t0 = now;
+                src_prev = sc;
             }
         }
 
@@ -503,11 +611,25 @@ void ai_thread(std::string model_path, int target_cls, int num_classes,
     if (collecting_enabled)
         std::cout << "采集统计: fire=" << n_fire << " det=" << n_det << " auto=" << n_auto
                   << " dropped=" << g_dropped.load() << "\n";
-    // 取帧层自己的账 (最新帧语义下取代/驱动丢/ERROR 三项在消费者跟得上时全 0)
+    // 取帧层自己的账: 交付/取代/驱动丢/ERROR 是**交付语义**的账 (稳态三项全 0), 后四项是
+    //   断流的账 —— 失锁与停流的判定次数、重建的成败、以及 fence 超时的次数与它烧掉的时间
+    //   (超时白等的时长 = 次数 × 上限, 实测 poll 恰好走到上限才返回; 口径见 io/hdmi_in.h)。
     const HdmiFormat& f2 = in.format();
+    const uint64_t n_to = in.fence_timeouts();
     std::cout << "收帧统计: 交付 " << in.delivered() << " / 取代 " << in.superseded()
-              << " / 驱动丢 " << in.lost() << " / ERROR " << in.invalid() << " (" << f2.width
-              << "x" << f2.height << " " << HdmiIn::fourcc_name(f2.fourcc) << ")\n";
+              << " / 驱动丢 " << in.lost() << " / ERROR " << in.invalid()
+              << " / 等 fence " << in.fence_waits() << " 次 (成功均值 "
+              << (in.fence_waits() > n_to
+                      ? in.fence_wait_us_sum() / (double)(in.fence_waits() - n_to) / 1000.0
+                      : 0.0)
+              << "ms, 最长 " << in.fence_wait_us_max() / 1000.0 << "ms) / fence 超时 " << n_to
+              << " 次 (白等 " << (double)n_to * (double)HDMI_FENCE_WAIT_MS / 1000.0 << "ms)"
+              << " / 失锁 " << in.lock_lost() << " 次 停流 " << in.stalled()
+              << " / 重建 " << in.rearm_ok() << " 成功 " << in.rearm_fail() << " 失败"
+              << (in.rearm_ok() ? (" (上次恢复耗时 " + std::to_string((long)in.last_rearm_ms()) + "ms)")
+                                : std::string())
+              << " (" << f2.width << "x" << f2.height << " " << HdmiIn::fourcc_name(f2.fourcc)
+              << ")\n";
     in.close();
     std::cout << "AI 线程已退出\n";
 }

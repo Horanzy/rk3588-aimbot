@@ -41,6 +41,42 @@
 //  QUERY_DV_TIMINGS 报 ENOLINK "Link has been severed"; 已接但 TMDS 未锁报
 //  ENOLCK "No locks available" — 两者都是"还没锁上", 都在重试窗口内)。
 //
+//  --- 失锁 / 断流与重建 (rearm) ---
+//  接收器会**在源切模式 (主机/主机的 HDR 开关、游戏机开机或切输入) 时失去 TMDS 锁**,
+//  驱动随即自己停流 (`stream start stopping` / `stream stopping finished`), 源重发模式后
+//  接收器重新锁上 (`signal lock ok` + `hdmirx_format_change: New format: …`)。**重锁不会
+//  把流接回去**: 驱动停流之后 vb2 队列不再产帧, 而它自己不会替调用方重新 STREAMON。
+//  于是"信号回来了但画面永远没有"是这条链路的常态故障, 症状只有 poll 超时 —— 一个把
+//  poll 超时当成"再等等"的消费者会一直等下去, 而把它当成"设备坏了"的消费者会把整条
+//  链带走 (后者正是本层要否掉的行为)。
+//
+//  判据分两层, 因为两类"没有帧"的物理原因不同、恢复动作也不同:
+//    (1) **接收器锁定是唯一的快速可观测量**。poll 分片 (HDMI_POLL_SLICE_MS) 内没有帧时查
+//        VIDIOC_QUERY_DV_TIMINGS: 它失败就是"信号/流断了" (驱动在失去 TMDS 锁时
+//        hdmirx_g_dv_timings 直接报 not locked), 立刻按断流处理 —— 察觉延迟上限 = 一片,
+//        而不是整个 poll 预算。同一个查询也用在 fence 超时上: 载荷没写完 + 未锁定 = 那
+//        一帧是断流的第一个症状, 不必等下一帧。
+//    (2) **整个 poll 预算 (HDMI_POLL_TIMEOUT_MS) 内没有帧而接收器仍在锁上**, 或者连续
+//        HDMI_FENCE_FAIL_MAX 帧的 dma-fence 都没 signal, 则是"流在驱动侧停了/队列不再
+//        交付"(消费侧或驱动侧), 同样按断流处理。这一支存在的意义是**不把"信号还在、
+//        驱动还在产帧"的假象当作健康** —— 恢复路径对两者是同一条。
+//  两类都返回 HdmiFail::{LockLost,Stalled} 并进入 rearm(); 单次 fence 超时返回
+//  HdmiFail::Fence (丢了一帧, 驱动的下一次 DQBUF 会自行把上一根 fence signal 掉, 见
+//  HDMI_FENCE_FAIL_MAX), 被信号打断返回 HdmiFail::Interrupted (退出路径, 不重建)。
+//
+//  **重建的顺序与理由**: STREAMOFF (容忍错误 —— 流已经死了, 这一步本来就可能失败) →
+//  munmap → 关掉 EXPBUF 导出的 dmabuf fd → REQBUFS(0) → 关设备 → 重新打开 → 有界等锁
+//  → 读 G_FMT → 重建缓冲/入队 → STREAMON。最后两步的先后是硬的: 缓冲尺寸由**锁定后的**
+//  格式导出 (模式变化同时改分辨率与帧率, 1440p 与 1080p 的 11.06MB/8.29MB 缓冲不是同一
+//  种东西), 所以"先锁后读"是分配正确的缓冲的前提 —— 本层的 arm() 把 wait_timing_lock
+//  放在 G_FMT 之前, 这条顺序对首次打开与重建是同一条。
+//  重建**不重新解析设备节点**: 节点号在一次启动内是稳定的 (跨重启才不稳定, 见上), 首次
+//  打开解析出来的路径被记住并复用; 记住的路径打不开就按失败报出来 (那才是真的没了)。
+//
+//  重建的失败是**可重试的**而不是终局: rearm() 失败时设备处于关闭状态, 再调一次就是
+//  完整的一次新尝试 (调用方按 HDMI_REARM_MIN_MS 的节拍重试)。这条让"源还没上电/还在换
+//  模式"与"设备坏了"在行为上一致 —— 都是继续等, 而不是带走进程。
+//
 //  **最新帧语义** (HdmiDelivery::Newest, 生产路径): 消费者比信号慢时, 按队列顺序
 //  逐帧处理会越落越远 —— 交出去的永远是队列头那帧, 它的年龄随落后程度累积, 而
 //  控制环读的是交叉位置, 读的是几分钟前(字面意义)的画面。故 wait_frame 一拿到
@@ -105,6 +141,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -131,11 +168,43 @@ constexpr int HDMI_LOCK_POLL_MS = 200;
 // 等 dma-fence 的上限: 低延迟模式给出的完成通知早于载荷写完, fence 才是写完的凭据
 //   (实测 120fps 下 5.27ms, 即约 0.63 个帧周期), 而本层支持的信号最低到 60fps
 //   (帧周期 16.7ms) —— 上限取 2 个 60fps 帧周期再取整 = 40ms。
+//   选择规则 (改这个数要按它算): fence 在该帧载荷写完时 signal, 而这个时刻落在这一帧的
+//   传输窗口内, 故**合法等待 ≤ 一个帧周期**; 上限取它的 2 倍 = 给最慢支持信号 (60fps 的
+//   16.7ms) 与调度抖动留的整倍余量 —— 不能再小: 压到 20ms 就是 1.2 倍余量, 会把"晚一点
+//   但真的会写完"的帧误判成丢帧, 而一次误判的代价是半张画面进下游 (比 40ms 的等待重得
+//   多)。超时侧的成本是算出来的: 超时意味着这一帧的 fence 永不再 signal (驱动的丢帧
+//   路径), 白等的就是上限本身 —— 40ms 的线程时间加一帧的检测 (120fps 下 4.8 个帧周期)。
+//   这笔成本的实际发生率与成功等待的真实分布由 fence_waits / fence_timeouts /
+//   fence_wait_us_sum 三个观测直接给出 ([AI FPS] 行的增量段与退出时的"收帧统计:"),
+//   "上限该不该更小"由那两个数回答 —— 判据是量出来的, 不是估出来的。
 constexpr int HDMI_FENCE_WAIT_MS = 40;
 
-// wait_frame 的 poll 上限: 120fps 信号每 8.33ms 出一帧, 2000ms = 240 帧的时间,
-//   到这个量级还没帧就是流断了 (或信号掉了), 报错比无限等更有用。
+// 连等 fence 超时的判定线 = 队列块数 − 1 (消费者手上最多留 1 块, 见"最新帧语义"): 驱动的
+//   丢帧路径只在"队列里没有空缓冲"时触发, 而它给该缓冲留下的 fence **永远不会再 signal**
+//   (下一次 DQBUF 会把它顺手 signal 掉 —— 内核日志 hdmirx_dqbuf_get_done_fence: last fence
+//   not signal, signal now!, 所以单次超时是驱动能自愈的丢帧)。HDMI_BUF_DEFAULT − 1 帧
+//   = 缓冲整整转完一圈而**没有一帧载荷写完** —— 那不是丢一帧, 是流不再产数据 (重建才是
+//   恢复路径)。按 40ms 上限算, 这条线对应 120ms 的窗口。
+constexpr int HDMI_FENCE_FAIL_MAX = HDMI_BUF_DEFAULT - 1;
+
+// wait_frame 的一次 poll 分片: 分片结束且无帧时查一次接收器锁定状态 —— "信号掉了"只有
+//   这一个快速可观测量 (见文件头)。取 200ms = 驱动自己的锁定重试步长 (HDMI_LOCK_POLL_MS),
+//   于是断流被察觉的延迟上限是一片 (200ms = 120fps 下 24 帧 / 60fps 下 12 帧), 而总的
+//   无帧容忍仍是 HDMI_POLL_TIMEOUT_MS (分片不改变预算, 只把"还没有帧"按片检查一次锁定)。
+//   健康信号下第一片就拿到帧, 故稳态里这个查询一次都不发生。
+constexpr int HDMI_POLL_SLICE_MS = 200;
+
+// wait_frame 的 poll 总预算: 120fps 信号每 8.33ms 出一帧, 2000ms = 240 帧的时间,
+//   到这个量级还没帧而接收器仍在锁上, 就不是抖动而是流停了 (或缓冲被消费者占死),
+//   需要重建而不是继续等。
 constexpr int HDMI_POLL_TIMEOUT_MS = 2000;
+
+// 两次重建尝试的**起点**之间的最小间隔: 一次尝试本身含"有界等锁" (HDMI_LOCK_WAIT_MS),
+//   所以失败的尝试已经把下一次推后到 ≥2s; 这条 1s 只在尝试很快失败时起作用 (节点打不开),
+//   免得按拍率空转。1s 是"源重发模式并重新锁定"这条现场时间量的下界 —— 复现它的命令在
+//   io/hdmi_in.cpp 头部 (给接收器写别的 EDID → 源重新协商), 比它更密的尝试只是把同一件
+//   事重复问一遍。
+constexpr int HDMI_REARM_MIN_MS = 1000;
 
 // 一块采集缓冲的两条通路: mmap (CPU 参照实现 / 截图) 与 EXPBUF 导出的 dmabuf fd
 //   (RGA 直接消费, 不落 userspace)。两者是同一块内核缓冲, index 就是 V4L2 下标。
@@ -177,6 +246,33 @@ enum class HdmiDelivery {
     QueueOrder,   // 对照路径: 严格按队列顺序, 只由 release 归还
 };
 
+// 取帧失败的去向 (与设备无关的纯判据, 调用方据此决定"重建"还是"下一帧再来"):
+enum class HdmiFail {
+    Ok = 0,
+    Fence,        // 帧到手但载荷没写完 (dma-fence 没 signal) — 丢了一帧
+    LockLost,     // 接收器未锁定 (poll 分片无帧, 或 fence 超时后查到) — 流断了
+    Stalled,      // 整个 poll 预算无帧而接收器仍锁定, 或连续 fence 超时到线 — 流不产数据
+    Error,        // ioctl/poll/设备异常 (含时间戳口径不符) — 会话状态可疑
+    Interrupted,  // poll 被信号打断 (退出路径, 与流无关)
+    NoStream,     // 未起流: 调用方在重建失败之后继续取帧了
+};
+
+// 是否该拆掉会话重建 (见文件头): 只有"流断了"与"会话状态可疑"值得重建。
+//   单次 fence 超时是丢帧 (驱动的下一次 DQBUF 会自行 signal 掉它), 连续到
+//   HDMI_FENCE_FAIL_MAX 由 wait_frame 归为 Stalled; Interrupted/NoStream 既不重建也不
+//   当作丢帧 (前者是退出信号, 后者是调用顺序)。
+constexpr bool hdmi_fail_needs_rearm(HdmiFail f) {
+    return f == HdmiFail::LockLost || f == HdmiFail::Stalled || f == HdmiFail::Error;
+}
+// 连续 fence 超时到线 (推导见 HDMI_FENCE_FAIL_MAX): 到线之后在 wait_frame 里就按 Stalled 报
+constexpr bool hdmi_fence_streak_is_loss(int streak) { return streak >= HDMI_FENCE_FAIL_MAX; }
+
+// 重建节拍: 两次尝试起点之间至少 HDMI_REARM_MIN_MS (出处见该常量)。
+inline bool hdmi_rearm_due(std::chrono::steady_clock::time_point last,
+                           std::chrono::steady_clock::time_point now) {
+    return now - last >= std::chrono::milliseconds(HDMI_REARM_MIN_MS);
+}
+
 class HdmiIn {
 public:
     HdmiIn() = default;
@@ -188,16 +284,27 @@ public:
     //   非空 = 原样使用 (显式 /dev/videoN)。失败返回空串并写 err。
     static std::string resolve_device(const std::string& spec, std::string* err);
 
-    // 打开 → 校驱动 → 读 G_FMT → 置 low_latency → REQBUFS/QUERYBUF/mmap/EXPBUF →
-    //   等 timing 锁定 → QBUF 全部入队 → STREAMON。任一步失败即 close() 并返回 false。
+    // 打开 → 解析/校驱动 → 等 timing 锁定 → 读 G_FMT → 置 low_latency →
+    //   REQBUFS/QUERYBUF/mmap/EXPBUF → QBUF 全部入队 → STREAMON。任一步失败即 close() 并返回
+    //   false; spec 与块数被记住, 之后的 rearm() 用同一份参数重来 (不重新解析节点, 见文件头)。
     bool open(const std::string& spec, int num_buffers = HDMI_BUF_DEFAULT,
               HdmiDelivery delivery = HdmiDelivery::Newest, std::string* err = nullptr);
+    // 重建: 拆掉当前会话 (见文件头) → 重新打开 → 有界等锁 → 按锁定后的格式重建缓冲并起流。
+    //   失败返回 false 并写 err, 此时设备处于**关闭**状态 —— 再调一次就是一次完整的新尝试
+    //   (open() 从未成功过时也可以直接用它, 它会把设备解析补上)。成功返回 true 并打印
+    //   重建耗时与前后格式。
+    bool rearm(std::string* err = nullptr);
     void close();
     bool opened() const { return fd_ >= 0; }
 
-    // 等一帧并交付 (Newest 下顺带把过期帧归还)。返回 false 时 err 说明原因
-    //   (信号断了 / poll 超时 / 被信号打断 / 帧被驱动标 ERROR)。
-    bool wait_frame(HdmiFrame* out, std::string* err = nullptr);
+    // 接收器锁定状态: VIDIOC_QUERY_DV_TIMINGS 成功 = true (顺带刷新 timing_ 与帧率);
+    //   失败 = false 并把驱动给的最后一条错误写进 err (ENOLINK "Link has been severed" =
+    //   源不在, ENOLCK "No locks available" = TMDS 未锁)。它是"信号掉了"唯一的快速可观测量。
+    bool query_lock(std::string* err = nullptr);
+
+    // 等一帧并交付 (Newest 下顺带把过期帧归还)。返回 false 时 err 说明原因, fail 给出
+    //   **去向** (要重建 / 只是丢了一帧 / 与流无关), 见 HdmiFail 与 hdmi_fail_needs_rearm。
+    bool wait_frame(HdmiFrame* out, std::string* err = nullptr, HdmiFail* fail = nullptr);
     // 归还一帧 (Newest 下 wait_frame 也会替调用方归还手上那帧)
     void release(int index);
 
@@ -224,6 +331,18 @@ public:
     // 上一帧等 dma-fence 的实际耗时 (µs): 交付延迟里低延迟模式的固有成分, 探针据此把它
     //   与 userspace 侧开销分开报 (两者合起来才是"拿到手时这帧有多旧")
     double   last_fence_wait_us() const { return last_fence_wait_us_; }
+    // fence 等待的账 (HDMI_FENCE_WAIT_MS 那条选择规则的实测落点): 等过多少次 / 其中等到
+    //   超时多少次 / 等待总时长与最长一次 (µs)。**成功的等待不超过一个帧周期, 超时的那几次
+    //   烧掉的恰好是上限** —— 把这两个量分开是"上限该多大"唯一诚实的判据。
+    uint64_t fence_timeouts()   const { return fence_timeouts_; }
+    double   fence_wait_us_sum() const { return fence_wait_us_sum_; }
+    double   fence_wait_us_max() const { return fence_wait_us_max_; }
+    uint64_t lock_lost()  const { return lock_lost_; }    // 判为"接收器未锁定"的次数
+    uint64_t stalled()    const { return stalled_; }      // 判为"锁定但流不产数据"的次数
+    uint64_t rearm_ok()   const { return rearm_ok_; }     // 重建成功次数
+    uint64_t rearm_fail() const { return rearm_fail_; }   // 重建失败次数
+    // 上一次成功重建的耗时 (ms; 0 = 还没重建过): "断流→画面回来"的实测恢复时间
+    double   last_rearm_ms() const { return last_rearm_ms_; }
 
     // 锁定时序导出的帧率 (Hz) = 像素时钟 / (总宽 × 总高): 帧率是**信号的属性**,
     //   由接收器报的时序给出 (有效区尺寸乘像素时钟得到的是像素率, 不是帧率);
@@ -237,6 +356,12 @@ public:
 private:
     bool set_low_latency(std::string* err);
     bool wait_timing_lock(std::string* err);
+    // 一次采集会话的建立: (fd 已打开时) 等锁 → 读格式 → low_latency → 缓冲/入队 → STREAMON。
+    //   设备解析不在这里 —— open() 解析一次, rearm() 复用 (见文件头)。任一步失败即 close()。
+    bool arm(std::string* err);
+    // 拆掉会话但**留着 fd**: STREAMOFF (容错) → munmap → 关 dmabuf fd → REQBUFS(0)。
+    //   流已经死了的时候每一步都可能失败, 一律容忍 (见文件头)。
+    void unstream();
     bool queue_buffer(int index);
     // 单次非阻塞取帧: 0 = 取到, 1 = 现在没有, -1 = 错误 (写 err)。ts_type / err_flag
     //   是驱动在缓冲 flags 里给的两件事, 不塞进对外的 HdmiFrame。
@@ -246,19 +371,26 @@ private:
     //   直接算通过 (非低延迟模式的完成点就是 dma_idle, 载荷本来完整)。
     bool wait_fence(int fd, std::string* err);
     static void close_fence(int fd);
+    static void set_fail(HdmiFail* f, HdmiFail v) { if (f) *f = v; }
     int  hold_index_ = -1;      // 已交付未归还的缓冲 (Newest 下下一次取帧时归还)
     int  fd_ = -1;
     bool streaming_ = false;
-    bool ts_checked_ = false;
-    std::string dev_path_, driver_;
+    bool ts_checked_ = false;   // 本次会话校验过时间戳类型
+    bool ts_announced_ = false; // 时间戳基准那句话只报一次 (重建会重开会话)
+    std::string spec_, dev_path_, driver_;
+    int  num_buffers_ = HDMI_BUF_DEFAULT;
     HdmiFormat fmt_;
     v4l2_bt_timings timing_{};
     std::vector<HdmiBuffer> bufs_;
     HdmiDelivery delivery_ = HdmiDelivery::Newest;
     int low_latency_ = -1;
     uint64_t superseded_ = 0, lost_ = 0, delivered_ = 0, invalid_ = 0, fence_waits_ = 0;
+    uint64_t fence_timeouts_ = 0, lock_lost_ = 0, stalled_ = 0, rearm_ok_ = 0, rearm_fail_ = 0;
     double last_fence_wait_us_ = 0.0;
+    double fence_wait_us_sum_ = 0.0, fence_wait_us_max_ = 0.0, last_rearm_ms_ = 0.0;
+    int  fence_fail_streak_ = 0;      // 连续 fence 超时 (成功的取帧清零; 线见 HDMI_FENCE_FAIL_MAX)
     bool fence_wait_ = true;
+    bool low_latency_announced_ = false;
     bool seq_valid_ = false;
     uint32_t last_seq_ = 0;
 };
