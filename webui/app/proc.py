@@ -59,7 +59,7 @@ FPS_HIST_MAX = 720                     # 60s 一读 → 12h 会话覆盖
 
 RUNNING_STATES = ("starting", "running", "stopping")
 
-STEP_NAMES = ("平台准备 (librga)", "aimbot 进程")
+STEP_NAMES = ("平台准备 (librga / raw_gadget + UDC / axcl)", "aimbot 进程")
 
 
 def sudo_prefix():

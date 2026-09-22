@@ -2,20 +2,53 @@
 
 ## Overview
 
-AI visual aimbot (mouse pass-through). Target hardware: **NVIDIA Jetson Orin** (aarch64, JetPack / TensorRT 10 / CUDA / OpenCV4 / GStreamer).
+AI visual aimbot (mouse pass-through) for **RK3588** (aarch64 — the deployment board is an
+OrangePi 5 Plus class machine, vendor kernel 6.1, g++/C++17, OpenCV 4, the kernel's `raw_gadget`).
 
 ```
-Capture card (UVC 1080p NV12) → GStreamer nvvidconv → CUDA preprocess → TensorRT YOLO
+Board HDMI RX (rk_hdmirx; the live system carries 2560×1440@120 BGR3)
+→ bare V4L2 MULTIPLANAR capture on dmabuf (zero copy, dma-fence gated, newest-frame delivery)
+→ RGA centre 1:1 crop to the canonical window (no scaling)
+→ AXCL NPU inference (AX650N card, .axmodel) → decode (core/detect) → NMS
 → alpha-beta tracking → control law (pole-placement PI + type-2 velocity feedforward)
 → merged with the real mouse (or the physical gamepad's right stick) → USB raw_gadget
 userspace device stack (generic HID mouse / Xbox 360 pad / P5 General pad) → game
 ```
 
-Three mutually exclusive output modes (`-M`): **hid** emits the corrections on the generic USB mouse (path above); **pad** passes a physical Xbox-layout gamepad through and merges the law's desired velocity onto its right stick, presenting the emulated **wired Xbox 360 pad** (VID/PID `0x045E/0x028E`) so the host's own XInput stack reads it as a controller (see "Pad mode"); **p5g** is that same gamepad input/merge/calibration chain aimed at the **PS5**: the Jetson presents itself as the **P5 General dongle-shaped device** (VID/PID `0x2B81/0x0101`) over raw_gadget while the **real P5 General dongle** — plugged into one of the Jetson's own host ports — signs every 64-byte input report over hidraw before it goes on the wire, and the PS5's auth challenge/response (feature reports `0xF0`/`0xF1`/`0xF2`) is forwarded verbatim (see "P5 output").
+Three mutually exclusive output modes (`-M`): **hid** emits the corrections on the generic USB mouse
+(path above); **pad** passes a physical Xbox-layout gamepad through and merges the law's desired
+velocity onto its right stick, presenting the emulated **wired Xbox 360 pad** (VID/PID
+`0x045E/0x028E`) so the host's own XInput stack reads it as a controller (see "Pad mode"); **p5g** is
+that same gamepad input/merge/calibration chain aimed at the **PS5**: the board presents itself as the
+**P5 General dongle-shaped device** (VID/PID `0x2B81/0x0101`) over raw_gadget while the **real P5
+General dongle** — plugged into one of the board's own host ports — signs every 64-byte input report
+over hidraw before it goes on the wire, and the PS5's auth challenge/response (feature reports
+`0xF0`/`0xF1`/`0xF2`) is forwarded verbatim (see "P5 output").
 
-**No hand-tuned gains inside the law; one hand-supplied physical scale per output mode.** The law's constants are principle-derived and its bandwidth follows the *measured* delay (`wn=(90−PM)π/180/L̂`, PM=50° from the test suite); what the operator supplies is the game's own input sensitivity — the one physical quantity the firmware cannot observe, since calibration measures the loop delay only. Auto-calibration is triggered by holding an operator key for 5 s (hid: both mouse side keys; pad/p5g: L3+R3, or the webui's button) and measures **only the loop delay L (ms)** online; **each output mode owns a slot of five hand-editable values in the game script** — its delay plus four per-axis pull-speed ratios — so switching `-M` switches the whole slot, and a calibration or a save touches that slot alone: `HID_L_EST`/`PAD_L_EST`/`P5G_L_EST` and `<mode>_SPDX`/`_SPDY`/`_ADS_SPDX`/`_ADS_SPDY` (`--spd`/`--ads-spd` — effective sensitivity = baseline / (ratio/100), so 100 is the baseline and a larger ratio pulls faster — its correct value is the one where the assumed sensitivity matches the real one, i.e. where the loop sits at its design point, and the law's proven mismatch envelope is ±30% (arena `s0.7–1.3`), so dialling faster than the game's true sensitivity spends phase margin). The control tick is 1 kHz (`DEFAULT_FREQ`). Adapts to PC / PS5 / 60fps / 120fps.
+**No hand-tuned gains inside the law; one hand-supplied physical scale per output mode.** The law's
+constants are principle-derived and its bandwidth follows the *measured* delay
+(`wn=(90−PM)π/180/L̂`, PM=50° from the test suite); what the operator supplies is the game's own input
+sensitivity — the one physical quantity the firmware cannot observe, since calibration measures the
+loop delay only. Auto-calibration is triggered by holding an operator key for 5 s (hid: both mouse
+side keys; pad/p5g: L3+R3, or the panel's button) and measures **only the loop delay L (ms)** online;
+**each output mode owns a slot of five hand-editable values in the game script** — its delay plus four
+per-axis pull-speed ratios — so switching `-M` switches the whole slot, and a calibration or a save
+touches that slot alone: `HID_L_EST`/`PAD_L_EST`/`P5G_L_EST` and
+`<mode>_SPDX`/`_SPDY`/`_ADS_SPDX`/`_ADS_SPDY` (`--spd`/`--ads-spd` — effective sensitivity =
+baseline / (ratio/100), so 100 is the baseline and a larger ratio pulls faster — its correct value is
+the one where the assumed sensitivity matches the real one, i.e. where the loop sits at its design
+point, and the law's proven mismatch envelope is ±30% (arena `s0.7–1.3`), so dialling faster than the
+game's true sensitivity spends phase margin). The control tick is 1 kHz (`DEFAULT_FREQ`). Adapts to
+PC / PS5 / 60fps / 120fps.
 
-**Control law**: the firmware (`src/main.cu` with `src/core/` and `src/io/`) uses **ff_pi_acc** (pole-placement PI + type-2 velocity feedforward with direction-contradiction CUSUM velocity reset and detection-gap FF decay, plus an innovation-mean â channel that removes the α-β structural lag on accelerating targets) — the convergence bandwidth `wn` is derived from the calibrated delay `L` via phase margin (`wn=(90°−PM)π/180/L`, PM=50°), **no hand-tuned numbers inside the law**, good generalization (the one operator-supplied quantity is the speed scale, below). The same binary has **optional training-data collection** (enabled with `-o`, otherwise pure aimbot). All control-law exploration/comparison/tuning happens in the pure-Python `arena/` simulation (this machine cannot compile .cu).
+**Control law**: the firmware (`src/main.cpp` with `src/core/` and `src/io/`) uses **ff_pi_acc**
+(pole-placement PI + type-2 velocity feedforward with direction-contradiction CUSUM velocity reset and
+detection-gap FF decay, plus an innovation-mean â channel that removes the α-β structural lag on
+accelerating targets) — the convergence bandwidth `wn` is derived from the calibrated delay `L` via
+phase margin (`wn=(90°−PM)π/180/L`, PM=50°), **no hand-tuned numbers inside the law**. The same binary
+has **optional training-data collection** (enabled with `-o`, otherwise pure aimbot). All control-law
+exploration/comparison/tuning happens in the pure-Python `arena/` simulation, which is
+platform-independent and needs no board.
 
 ## Author's requirements (binding)
 
@@ -43,7 +76,9 @@ band bit-exact", `PM=50` "chosen by the mismatch-band test suite", `FF_PM_DEG`/`
 dimensionless design choices with the reason stated. Corollary, and the reason this matters:
 a number no command can reproduce — typically one that came from an experimental file since
 deleted — must either gain a reproduction path or be removed, or be rewritten as a
-qualitative statement without it. The rule binds *constants*: the operator's speed scale (see Tuning) is an input, not a constant — its baseline carries provenance and its value is the game's business.
+qualitative statement without it. The rule binds *constants*: the operator's speed scale (see
+Tuning) is an input, not a constant — its baseline carries provenance and its value is the
+game's business.
 
 > 作者原话: "不能有'魔法数字'。……没有什么经过无数次微调得到的那种魔法数字。"
 
@@ -72,86 +107,138 @@ whatever is about to change before touching it, and do not accept a number in th
 fact without re-running its command — the figures here are measurements with reproduction
 paths, not axioms. After a change, re-run the full set above and list the files touched.
 Keep what was measured, what is inferred from documentation, and what is still unverified
-clearly apart; "should be better" is not a result — give a number or write "unverified".
+clearly apart; "should be better" is not a result — give a number or write "未验证".
 
 **7. Documentation and code move together.** A changed constant, default, CLI flag or module
 list updates its prose, its tables and its docstring defaults in the same edit.
 
-**8. `src/` is edited here, verified on the Jetson.** This machine cannot compile or
-run it; every `.cu` change needs a rebuild and on-device validation on the Jetson and is
-never reported as verified from here.
+**8. `src/` is edited in the Windows mirror, compiled and verified on the board over ssh.**
+This machine cannot compile it (no aarch64 toolchain, no AXCL/RGA/librga, no HDMI receiver);
+every `.cpp`/`.h` change needs `bash scripts/compile.sh` on the RK3588 board — which builds and
+runs the five unit tests — and any claim about behaviour comes from that run, never from
+reading the diff here.
 
 ## Environment
 
 - This folder is a **Windows development mirror**; code editing only.
-- Compile and run happen on the Jetson. Deployment directory e.g. `<deploy-root>/`; layout (dev mirror matches deployment):
+- Compile and run happen on the board: `ssh xiaoming10086@192.168.1.103`, deployment checkout at
+  `~/rk3588-aimbot`. Layout (dev mirror matches deployment):
 
 ```
 <deploy-root>/
-├── src/         CUDA/C++ source — main.cu (entry) + core/ (control law, estimator,
-│                calibration, TRT helpers, shared state) + io/ (capture, mouse input,
-│                gamepad input/merge, USB device stack, hot params)
-├── scripts/     compile.sh / convert.sh / setup_mouse.sh
+├── src/         C++17 source — main.cpp (entry) + core/ (control law, estimator,
+│                calibration sampling, detection-output parsing, shared state)
+│                + io/ (HDMI capture, RGA, NPU session, mouse input, gamepad
+│                input/merge, USB device stack, hot params)
+├── scripts/     compile.sh / setup_platform.sh (the single platform-setup entry point)
 │   ├── game/    launcher template (template.sh.example → 复制成 <game>.sh 使用)
-│   └── test/    e2e drivers + probes (uinput pad/calibration e2e, key probe,
-│                P5 General dongle bring-up, Windows XInput probe)
+│   └── test/    board probes + e2e drivers (hdmi_probe, model_probe, pipeline_probe,
+│                uinput pad/calibration e2e, key probe, P5 General dongle bring-up,
+│                Windows XInput probe)
 ├── docs/        p5general/ — the P5 General wire protocol (zh-CN/en)
 ├── webui/       browser control panel (FastAPI + vanilla JS)
-├── build/       per-TU object files
+├── build/       per-TU object files + the unit tests + the probes
 ├── bin/         build output (aimbot)
-├── engine/      *.engine model library
-├── onnx/        *.onnx
+├── engine/      *.axmodel model library (converted outside this repository)
+├── arena/       pure-Python control-law simulator (platform-independent; no board needed)
 └── dataset/     collection output (fire/ det/ auto/)
 ```
 
-- **All scripts resolve paths from their own location** (`realpath "$0"`, walking up to `ROOT`), independent of the calling cwd. **The whole directory can be moved/renamed freely** without breaking anything — no hardcoded deployment paths; only system paths like `/usr`, `/dev`, `/sys` are absolute.
-- `dataset/` is always at the **project root** (`$ROOT/dataset`, a sibling of `engine/` and `scripts/`); it never ends up inside `bin/` just because the binary lives there — `-o` receives an absolute path computed from the script location.
-- The USB output channel depends on the kernel **`raw_gadget` module** (mainline `drivers/usb/gadget/legacy/raw_gadget.c`) — an external dependency the deployment machine must provide itself: from the distro package when available, otherwise built out-of-tree per the kernel doc `Documentation/usb/raw_gadget.rst`. `scripts/setup_mouse.sh` only loads the module, frees the UDC and sets the node's permissions; the device stack itself lives in `src/io/usbraw.cu` and talks to `/dev/raw-gadget` directly.
-- This machine has no TRT/GStreamer and **cannot compile or verify**. After edits, hand off to the user to run `scripts/compile.sh` on the Jetson; never claim anything was verified here.
+- **All scripts resolve paths from their own location** (`realpath "$0"`, walking up to `ROOT`),
+  independent of the calling cwd. **The whole directory can be moved/renamed freely** without
+  breaking anything — no hardcoded deployment paths; only system paths like `/usr`, `/dev`, `/sys`
+  are absolute.
+- `dataset/` is always at the **project root** (`$ROOT/dataset`, a sibling of `engine/` and
+  `scripts/`); it never ends up inside `bin/` just because the binary lives there — `-o` receives an
+  absolute path computed from the script location.
+- **Deploy paths.** Windows mirror → GitHub (`Horanzy/rk3588-aimbot`, branch `main`): direct HTTPS
+  fails, so `git -c http.sslBackend=openssl -c http.proxy=http://127.0.0.1:7897 push origin main`
+  (plain `http.proxy` without the openssl backend fails the TLS handshake). Windows mirror → board:
+  the board's own GitHub access is unreliable, so push straight to it —
+  `git push ssh://xiaoming10086@192.168.1.103/home/xiaoming10086/rk3588-aimbot HEAD:refs/heads/deploy`
+  and then on the board `git reset --hard deploy && git branch -D deploy` (never leave a temp branch
+  behind on the board).
+- **Platform prerequisites** are `scripts/setup_platform.sh` — one idempotent entry point called by
+  both the launcher and the panel, covering the three things this repository consumes but does not
+  provide: **librga** (installed from upstream at the pinned `1.10.6_[3]` and read back for
+  verification), **raw_gadget** (module load + `/etc/modules-load.d` persistence + `/dev/raw-gadget`
+  permissions + vacating the UDC) and **axcl** (verified only — the library directory and
+  `/dev/axcl_host`; the NPU runtime belongs to the board's BSP image). Device-tree or kernel-config
+  changes are **not** part of it: the HDMI receiver node (`rk_hdmirx`), the in-kernel `rga3` driver
+  and the AXCL host driver are image facts. Record such findings as notes here, not as script steps.
+- The board image's own facts, for when a prerequisite fails: receiver node
+  `/sys/class/video4linux/videoN/name` = `stream_hdmirx` (driver `rk_hdmirx`; the node number is not
+  stable across reboots, which is why the default is name resolution), `raw_gadget` loadable with
+  `/dev/raw-gadget` present, `/dev/rga` present (rga3 built into the kernel), the axcl runtime in
+  `/usr/lib/axcl` with its modules loaded from the BSP's own
+  `/etc/modules-load.d/axcl_pcie.conf`.
+- All scripts and the panel use **LF** line endings (`.gitattributes` forces them; the board's `bash`
+  does not accept CRLF/BOM).
 
 ## Files
 
 | File | Role |
 |---|---|
-| `src/main.cu` | **The program entry**: argument parsing (including the output mode `-M hid` mouse / `-M pad` XInput pad / `-M p5g` P5 General pad), device open, thread spawn, the 1 kHz timerfd control loop (`DEFAULT_FREQ`), and the mode gating that starts exactly one output backend (hid reads the mouse and never touches the gamepad; pad/p5g read the gamepad and never start the mouse session — each owns the UDC). The two gamepad modes differ in nothing but the backend: the gamepad channel (input thread, merge/ledger routing, `CAL_MODE_PAD`, the pad tick) is entered whenever the mode is not `hid`, and only the start/stop call is switched on the mode name. Full aimbot + optional training-data collection (`-o`); without `-o` it is pure aimbot |
-| `src/core/control.cu/.h` | ff_pi_acc header constants (PRED_*/FF_*/CUSUM_*/ACC_* — pole-placement PI + type-2 velocity feedforward with direction-contradiction CUSUM velocity reset, detection-gap FF decay, gated â acceleration-bias compensation; wn derived from L, no hand tuning) + one control tick (`law_tick`) shared verbatim by the two channels — hid and the gamepad path (`pad`/`p5g`) — the difference is where the index goes: hid quantises to counts and writes the report's displacement bytes (recording `g_counts`), the gamepad path delivers the desired velocity (px/ms) and skips that tail — plus the hid mode's call into the shared calibration engine (`cal_step`, driven from this tick; the engine itself, the plan table and the state machine live in `io/calib_run`); the per-axis speed caps are `min(-x, A_eff/1000)` for pad (full deflection is that axis's travelling range) and collapse to the single `-x` for hid, and the own-motion ledger's source and ledger→pixel scale are taken from `io/pad_output` (mode routing) |
-| `src/core/estimator.cu/.h` | α-β filter + direction-contradiction CUSUM + innovation-mean â sensor (`estimator_step`, driven per frame by the capture thread; publishes `g_target`); the three own-motion conversions inside it (prediction subtraction, innovation cleaning, own-acceleration activity gate) take one per-frame snapshot of the ledge source and per-axis scale from `io/pad_output` |
-| `src/core/calib.cu/.h` | the calibration **sampling** layer, independent of camera and model: the fixed sampling geometry (a 640×640 centre crop of the captured frame, grayscale-downscaled with INTER_AREA to a 320×320 half-resolution correlation domain — `CALIB_SAMPLE_PX`, `CALIB_SAMPLE_SCALE` = 2 — split into 3×3 blocks of ≈106 correlation px), the **axial 1-D projection phase correlation** `calib_pc1d` (each block projected along the excitation axis, whitened cross spectrum, three-point parabolic sub-pixel peak) and the per-frame block statistics `calib_axis_stats` (stationary-cluster rejection at 0.5× the largest block shift → median displacement plus response/spread quality, with the pre-rejection median kept for the log), the per-frame `CalibSampler`, `persist_calibration` (atomic script write-back under the VAR name the caller passes — one name per output mode; a line written as the template's `${VAR:-…}` guard keeps its guard, only the default slot's value changes, and a trailing inline comment survives) and `resolve_cam_device`. The header carries the measured 1-D-vs-2-D comparison that chose the projection (0.90 vs 5.19 ms/frame, ±0.01 vs −0.04…−0.15 px on real texture, 0.54 vs 0.31 peak at a 60 px shift, identical HUD rejection and cross-axis leakage) and the reliable-shift bound (half the block's screen-domain width = 106 px/frame) |
-| `src/core/trt.cu/.h` | TensorRT Logger / `CHECK_CUDA` / BGR→RGB CHW preprocess kernels (kernel and its launch wrapper share one TU — no `-rdc`) / output-tensor parsing + NMS |
-| `src/core/state.cu/.h` | shared globals: system constants, `ms_to_ticks` (durations are wall-clock, ticks are derived), the **pull-speed ratio scale** (`spd`: integer, 100 = baseline, effective sensitivity = baseline/k — the single definition point of the hid per-axis effective `s`, of the pad full-deflection screen speed, of the clamp both entry points use, and of the ADS-pair switch with its exported key state), TargetState/CountsHistory/MouseState, hot-param & calibration atomics (`g_calib_collect`/`g_calib_request`/`g_calib_done`/`g_padcalib_request`), time helpers, async save queue, signal |
-| `src/core/control_test.cu` | `build/control_test` unit test (built and run by `compile.sh`): the pull-speed ratio's landing points — spd=100 is the baseline (1 count = 1 px at the hid base), per-axis independence, the ADS pair switching on the very tick the right key is held, and the three consumers (injection, in-flight compensation, the estimator's own-motion conversion) sharing one per-axis effective sensitivity; plus the clamp band and the hot-param path, and the calibration write-back — the whole file compared byte for byte: the value lands in the caller's VAR, the `${VAR:-…}` guard form and its inline comment survive, a bare line is rewritten bare and a missing line is appended |
-| `src/io/hid_mouse.cu/.h` | real-mouse input and USB mouse identity: evdev read (EVIOCGRAB; device picked by `-D`, default = lexicographically first `*-event-mouse` so the choice is deterministic, an explicit substring matching several nodes is an error listing the candidates, an absolute `/dev/input/eventN` path is taken as-is — which is how a uinput synthetic mouse is selected) + the USB mouse device definition (device/config/report descriptors — the report descriptor is the single source of truth for the 9-byte report layout; the identity is the kernel's generic gadget IDs `1d6b:0104` — a mouse is bound by HID class on every host, so a vendor identity would carry no information, and this one is the identity the deployment host's HID stack is already bound to, keeping its pointer settings in force) + per-tick report assembly submitted into the raw_gadget session's latest-report slot (control counts merged via the overlay callback) |
-| `src/io/capture.cu/.h` | GStreamer pipeline + `ai_thread` (capture → inference → `estimator_step`; three-source collection and preview) + the calibration sampling/fit/write-back path: while `g_calib_collect` the **inference path is skipped entirely** (calibration needs neither detection nor injection — the freed GPU/CPU pays for the correlation, and the published target simply ages out; the first detection after the run re-locks through the existing `TRACK_JUMP_GATE`), a fixed 640×640 centre crop is downscaled to the half-resolution correlation domain and measured block-wise along both axes, the per-frame displacements are pushed into the history with their excitation slot (`cal_note_sample`), and on `g_calib_request` the mode's fit runs, the diagnostics print with the round's measured sampling rate and per-frame sampling cost, and the delay is written back under the mode's VAR |
-| `src/io/calib_run.cu/.h` | **the shared calibration engine for all three output modes** (one measurement method, one state machine, one fit — a mode supplies only the excitation plan, the injection units and the write-back VAR name; the deliverable is `L` only): the plan table (`cal_plan`, hid = 2 pairs × 2 axes, pad = 3 pairs × the horizontal axis, signs alternating so the picture returns to its start, every excitation followed by a 300 ms zero-command pause), the segment-window table, the online travel accumulator (`cal_note_sample` → `g_cal_live_travel`/`g_cal_live_slot`, read by the state machine's to-target stop rule), the fit (`cal_fit`), the diagnostics and the write-back — the observation model, the three readings, every gate's source and the state machine are stated in the "Calibration" section below. The 1 kHz tick of that mode (`cal_step`) plays the plan, aborts an axis after two consecutive timeouts while keeping its pauses as the σ pool, and ends with nod/shake; success writes **the caller's delay VAR — `HID_L_EST` (hid) / `PAD_L_EST` (pad) / `P5G_L_EST` (p5g): one slot per output mode, so pad and p5g share the excitation plan but never each other's delay** |
-| `src/core/calib_test.cu` | `build/calib_test` unit test (built and run by `compile.sh`): sampling geometry invariants (centred unscaled crop, scale factor, correlation-domain size, reliable shift bound, edge quantization floor), the block statistics on synthetic frames (injected-equals-recovered, a stationary HUD majority hijacking the plain median to ≈0 while the rejected median stays exact, a minority of static blocks, the single-outlier fallback, the scale-free rejection threshold, the untextured-frame path), the 1-D-vs-2-D comparison (both implementations, error and cost), the state machine (plan shape and amplitudes, the trigger hold, the start cross not sampling, the to-target stop, the unresponsive-axis abort and its bounded round length, the printed plan span vs the trigger-inclusive historical depth, the pure-pass-through reset, the per-round verdict reset, the `padcalib` re-entrancy drop) and the **synthetic closed-loop e2e** — a virtual game with a known `L` (optional first-order lag, detection noise, dropped frames, 60/120 fps, and a per-axis `L` so the two axes can disagree) driven through the real state machine and fit, printing and asserting each case's deviation and scatter, including the two two-axis chains (a 30 ms axis difference fails the round on the tail family's dispersion gate while both per-axis medians are still reported; a 4 ms one succeeds with the written value at the whole-round median) — plus the honesty paths (frozen screen, noise-only screen, a tail longer than the pause → a failed round, no write-back, the script's VAR untouched) and the three output slots (a successful round writes `PAD_L_EST` with its guard intact while the other two slots stay byte-identical, and the p5g name lands in its own slot) |
-| `src/io/usbraw.cu/.h` | raw_gadget session carrier: sysfs two-level UDC name discovery → INIT/RUN/VBUS_DRAW; the ep0 standard-request table (descriptors truncated to `wLength`, status/configuration/interface/feature; OUT or zero-length SETUPs closed through EP0_READ), device-specific requests answered by an optional per-device hook, unanswered ones STALLed — an unanswered SETUP would leave the kernel's ep0 stage pending and fail every later control transfer of the session; the interrupt-IN **latest-report slot** send thread (EP_WRITE length = submitted length — a short packet is a packet boundary) and an optional interrupt-OUT receive thread (EP_READ blocking, packets have no consumer and are dropped). Report rate = min(tick rate, host service rate) — the slot holds one state, not a queue, so the host sees exactly one report per report the producer submitted and no submission can turn into two host-visible reports, while a producer faster than the host has its extra submissions coalesced. Every 60 s the send thread prints **both layers** of that rate — submissions/s (the device-side production cadence) and write completions/s with their mean interval (the cadence at which the host takes reports) — under the device's own tag (`[USB-HID]` / `[PAD-USB]`); equal numbers mean no backlog, a lower completion rate means the host's polling ceiling (endpoint `bInterval` × enumeration speed) or host scheduling is the bottleneck. The same line carries the OUT received count: it is the existence observable for the host's own commands (the measured run shows 4 in a 60 s window — real, and low-rate, exactly what LED/force-feedback traffic looks like). The 60 s window is reopened when a gap (disconnect / suspend / the host pausing its polling) exceeds 100 ms, so a pause is never counted as slow polling. Session parameters come from the device definition: enumeration speed (which sets the time unit of the endpoint `bInterval`), device qualifier (nullptr = none, that GET_DESCRIPTOR STALLs — the spec behaviour of full-speed-only devices; a high-speed device answers it), VBUS request (taken from the configuration's `bMaxPower`, uapi unit 2 mA, matching the kernel's `usb_gadget_vbus_draw(2 × value)`), descriptor set, endpoint set and class-request semantics. The OUT endpoint's enable/retire handshake is the kernel's own constraint: EP_ENABLE needs the endpoint disabled and no request in flight (`urb_queued` → `EINVAL`), and only the reading thread can observe an in-flight request end, so retirement wakes the reader, waits for it to leave the read, then disables — an enabled-but-unread OUT endpoint NAKs the host's command transfers forever. Shutdown wakes the threads blocked in endpoint ioctls with a no-op signal: those in-flight ioctls hold a file reference, so closing the fd alone cannot drive the UDC release |
-| `src/io/pad_input.cu/.h` | pad-mode input: evdev gamepad read (`-P` by-id substring, falling back to a name+capability scan over `/dev/input/event*` because uinput/Bluetooth pads have no by-id node), capability bitmap verified per device (axis family `RX/RY` vs `Z/RZ` chosen from the bitmap, trigger axes from the same bitmap, ranges from absinfo — nothing hardcoded), Xbox-layout `PadLogical` state, disconnect self-heal (clear keys + 1 s reopen retry, non-blocking at startup), and the **sibling event nodes**: every `/dev/input/event*` whose `EVIOCGID` VID:PID matches the joystick node's is opened too and only its `EV_KEY` events are consumed through `pad_extra_key_bit` (measured: the G7 Pro exposes joystick + keyboard + mouse from one USB device and its share/upload button emits `KEY_SYSRQ` on the keyboard node with the joystick node seeing nothing at all, so reading the joystick node alone silently loses it). The P5 General dongle's own node is excluded from the candidates by VID/PID (`0x2B81:0x0101`) — it is the p5g mode's authentication peripheral, not a human channel. The **8-bit→16-bit mapping** is a uniform-step expansion table (midpoint exactly 0, 254 steps of 258 plus one endpoint-absorbed step of 1) with an independently written golden table in the unit test — see "Pad mode" below for the rule and its numbers |
-| `src/io/pad_output.cu/.h` | pad-mode merge layer (shared by any gamepad output backend): law velocity → right-stick injection conversion `d = v·1000/A_eff` per axis with `A_eff = gain_pad_eff(spd_axis(ads, axis))`, merge with the human stick and radial clamp to the full-scale circle, the stick ledger `Σ(deflection·ms)` (the pad counterpart of the `g_counts` invariant: what the game actually received) with its per-axis ledger→pixel factor `s_rp = A_eff/(32767·1000)`, the `own_motion_ledger`/`own_motion_scale` mode routing (hid = `g_counts` × per-axis effective sensitivity, pad = the stick ledger × per-axis `s_rp`), the `g_pad_publish` latest-slot publish point the output backend polls, the **per-axis speed cap** `min(-x, A_eff/1000)`, the 1 kHz pad tick (snapshot → RT/LT trigger word → **calibration step** (`io/calib_run.h`; while a round runs the excitation owns the whole pad — `pad_excite` writes the excitation on the right stick and centres the human share of both sticks *and* both triggers, keeping the button word so L3/R3 still reach the game: a held left stick translates the whole picture and a trigger can put the game into an aiming state, either of which changes the very response being measured, and neither shows up in the pause windows where σ is read → law velocity → merge+ledger → publish) and `--pad-dump` (a `[PAD]` line every ≥50 ms: the merged state plus `fire`/`ads`/`aim_gate` — during a round it traces the excitation waveform) |
-| `src/io/pad_xinput.cu/.h` | pad-mode output backend: the wired Xbox 360 pad's device bytes (`0x045E/0x028E`, vendor interface FF/5D/01, interrupt IN 0x81 + OUT 0x02 both 32 B, the 16-byte `0x21` vendor descriptor Windows' enumeration needs, no HID report descriptor — the byte set is the tinyusb-xinput reference, hardware-verified against a genuine pad's descriptor dump) and the 20-byte input report encoder (explicit `u8[20]`: header `00 14`, int16 LE sticks, 0–255 triggers, button bits; the wire's Y is up-positive while `PadLogical`'s is up-negative) plus the report loop submitting every control tick into the session's latest-report slot. **Enumeration speed and endpoint `bInterval` together are the terminal refresh rate** (USB 2.0 §9.6.6): the shipped pair is **high speed + `bInterval=4`** (`2^3` microframes = 1 ms = 1000 Hz), with the device qualifier a high-speed device must answer; full speed + `bInterval=1` also declares a 1000 Hz ceiling and the device side completes writes at 1000 Hz (mean 1.00 ms), but the host's XInput *state* does not follow it (measured: with one constant merged state `lx=−32767 / rt=128 / btns=0x0001`, full speed reports zeros while high speed matches field for field), so the pair is pinned by that measurement. **The serial number is derived per machine** (FNV-1a-64 of `/etc/machine-id`, falling back to the dbus machine id then the hostname → 12 uppercase hex digits): the host derives its device instance id from it, so a fixed public constant would both collide across units and hand out a recognisable device fingerprint; derived-not-random keeps one identity across reboots and re-plugs. The derivation deliberately does **not** include the descriptor bytes: the generation experiment (same derived serial reused across two different definitions) showed the host re-reads the descriptors and re-binds on every arrival, so an instance-cache conflict is not a failure mode and adding the definition to the hash would only litter the host's registry with stale instances |
-| `src/io/pad_p5g.cu/.h` | p5g-mode output backend (PS5): the Jetson presents the **P5 General dongle-shaped device** (0x2B81/0x0101, full speed, single HID interface, interrupt IN 0x82 64 B @1 ms + OUT 0x01 64 B @6 ms, 165-byte report descriptor — the byte-exact clone of the GP2040-CE reference firmware's descriptors, every constant documented in `docs/p5general/`) and drives the **real dongle** plugged into a host port via its hidraw node (`/sys/bus/hid/devices/0003:2B81:0101.*/hidraw/*`: interrupt IN = read, interrupt OUT = write, feature control transfers = `HIDIOCS/GFEATURE`). The PS5's auth handshake is forwarded verbatim (SET_REPORT 0xF0 challenge → dongle; GET_REPORT 0xF1 signature/nonce and 0xF2 signing state ← dongle; the reference state machine's dispatch table — f1 quotas 4/1/0 by challenge type, the +500 ms auto-F2, the one-GET-behind read semantics, the idle-only F0 acceptance — is ported rule for rule), and the signing pipeline submits every merged report to the dongle and sends the PS5 **only the bytes the dongle returned** (change-driven + 4 repeats + a single report in flight, all reference rules; the reference's drop-on-backpressure branch is realized structurally rather than exercised: a returned report goes straight into the session's latest-report slot, which overwrites rather than queues, so nothing accumulates to drop). Three deliberate deviations from the reference, all robustness additions that keep the protocol semantics: a failed transfer abandons the round to idle instead of hanging in a wait state forever (the reference's documented dead end — the PS5's own timeout re-sends the challenge and the round restarts), dongle loss closes the hidraw and rescans on a 1 s cycle (the reference never resets its state machine on unplug), and the signature round trip carries a 500 ms watchdog — the same budget the reference firmware grants the dongle for its auto-F2, i.e. its own longest explicit wait. The ep0 class-request segment routes to the device's hook (see `usbraw`): GET_REPORT(0x03) answers the 48-byte static definition, unknown feature IDs STALL. Watchdog-free of tuning knobs: every timing constant cites the reference's own 500 ms dongle budget; the trigger's wire digital bit gates at 16/255 (first whole value above the measured G7 Pro trigger flat of 15/255 — the same measurement the `padthr` default cites), the analog value itself passes through untouched |
-| `src/io/pad_test.cu` | `build/pad_test` unit test (built and run by `compile.sh`): the 8-bit→16-bit mapping (neutral exactly 0, endpoints exactly ±32767, monotone, centred devices passing through, trigger scaling), the injection/merge geometry (linear per-axis `v/A_eff`, radial clamps, the ledger booking the post-clamp value and its unit identity with `s_rp`), pass-through 1:1, the trigger threshold and `-k` gate, the **per-axis speed cap** `min(-x, A_eff/1000)` (saturating command landing exactly on the cap, per-axis independence, the cap moving with the ratio), the ledger routing and per-axis `own_motion_scale` (including the ADS pair switching), the publish-point contract, the XInput wire format (header, button bit tables, trigger pass-through, int16 LE assembly and the Y convention, the touchpad bit having no XInput landing spot) and the device bytes (identity, 48 B configuration, the `0x21` blob, both endpoints, the qualifier, high-speed enumeration, the poll-rate derivation `8000 >> (bInterval−1) = 1000 Hz`, the 20-byte report fitting one packet, the derived 12-digit serial, and the configuration's endpoint bytes matching the `EP_ENABLE` descriptors byte for byte); plus the **P5G side**: the 8-bit wire map's round-trip identity over all 256 codes (with the rejected `(v+32768)>>8` form's 127 failures counted beside it), the injection landing (`floor(inject/258)` whole steps, hand-computed expectations, floor/arithmetic-shift rounding at the step boundary, both merged-clamp ends), the 64-byte report encoding byte by byte, the device bytes (identity, 41 B configuration, both endpoints, the 165-byte report descriptor's structural anchors across its whole length, the 8-bit stick declaration at its exact offsets, the hook, the `PAD-USB` rate tag), the auth state machine on a synthetic dongle (verbatim forwarding, the 4/1/0 dispatch table, auto-F2 timing, one-GET-behind reads, idle-only acceptance, failure-abandon recovery, reset and absent-dongle semantics) and the signing pipeline (change-driven submits, repeat quota, single in-flight, drop-on-backpressure, the pending watchdog); plus the sibling-interface key translation and the 8/16-bit resolution comparison, and the absent-device path (non-blocking, no report) |
-| `src/io/hotctl.cu/.h` | UDP hot-parameter channel 127.0.0.1:47700 (`hotctl_apply` is the pure key/value apply step — testable without a socket) |
-| `scripts/compile.sh` | nvcc build of aimbot → `bin/` via per-TU objects in `build/`, plus the `build/control_test`, `build/pad_test` and `build/calib_test` unit tests (built and run on the Jetson; a failing assertion aborts the build) |
-| `scripts/convert.sh` | Batch ONNX → TensorRT engine conversion |
-| `scripts/setup_mouse.sh` | raw_gadget module load + UDC vacated (legacy gadget instances unbound) + `/dev/raw-gadget` permissions |
-| `scripts/test/uinput_pad_test.py` | pad-mode e2e on the Jetson: synthesizes a virtual Xbox-layout gamepad via uinput (xpad-style axes, deliberately unlike the G7 Pro's HID-style bitmap) and asserts passthrough 1:1, trigger scaling, fire/ads gating, dpad, unplug/reconnect recovery against the aimbot's `--pad-dump` output (pure stdlib, run under sudo) — the dump reads the publish point, which is backend-independent, so the same assertions cover the whole input/merge chain |
-| `scripts/test/uinput_calib_test.py` | calibration e2e on the Jetson (pure stdlib, run under sudo): synthesizes the mode's trigger device (`--mode hid` = a virtual mouse whose `BTN_SIDE`+`BTN_EXTRA` are the side-key pair; `--mode pad` = a virtual pad triggered with L3+R3) and drives one full round against the capture card, then asserts the four things a round must show — the trigger line, the plan playing with per-segment evidence, `--pad-dump` proving the pad is owned by the excitation (right stick deflecting ±16384, left stick and both triggers centred, L3/R3 still passing through), the round's measured sampling rate / capture rate / no-sample fraction / per-frame sampling cost, and the verdict with its write-back rule. A static screen (no game) is the expected failure here, and that is the assertion that matters most: the round must say why and leave the profile script byte-identical |
+| `src/main.cpp` | **The program entry**: argument parsing (including the output mode `-M hid` mouse / `-M pad` XInput pad / `-M p5g` P5 General pad), capture-device resolution (`-d` accepts only a `/dev/videoN` path; anything else is ignored with a note, since this platform has one built-in receiver and no by-id node), the one output-backend start (each mode owns the UDC), thread spawn and the 1 kHz timerfd control loop (`DEFAULT_FREQ`). The gamepad channel (input thread, merge/ledger routing, `CAL_MODE_PAD`, the pad tick) is entered whenever the mode is not `hid`; only the start/stop call is switched on the mode name. The law's frame-length scale is read from `src_fps()` every tick, so the receiver's own timing takes effect the moment it reports it. Exit uses `_Exit` — the axcl libraries abort in static destruction (measured RC=134) after the output has already been printed. Full aimbot + optional training-data collection (`-o`); without `-o` it is pure aimbot |
+| `src/core/control.cpp/.h` | ff_pi_acc header constants (PRED_*/FF_*/CUSUM_*/ACC_* — pole-placement PI + type-2 velocity feedforward with direction-contradiction CUSUM velocity reset, detection-gap FF decay, gated â acceleration-bias compensation; wn derived from L, no hand tuning) + the two control-tick entry points: `control_apply` (hid — quantises to counts and writes the report's displacement bytes, recording `g_counts`) and `control_apply_pad` (delivers the desired velocity in px/ms and skips that tail). The per-axis speed caps are `min(-x, A_eff/1000)` for pad (full deflection is that axis's travelling range) and collapse to the single `-x` for hid, and the own-motion ledger's source and ledger→pixel scale are taken from `io/pad_output` (mode routing) |
+| `src/core/estimator.cpp/.h` | α-β filter + direction-contradiction CUSUM + innovation-mean â sensor (`estimator_step`, driven per frame by the capture thread; publishes `g_target`); the three own-motion conversions inside it (prediction subtraction, innovation cleaning, own-acceleration activity gate) take one per-frame snapshot of the ledge source and per-axis scale from `io/pad_output` |
+| `src/core/calib.cpp/.h` | the calibration **sampling** layer, independent of camera and model: the fixed sampling geometry (a 640×640 centre crop of the captured frame, grayscale-downscaled with INTER_AREA to a 320×320 half-resolution correlation domain — `CAL_SAMPLE_PX`, `CALIB_SAMPLE_SCALE` = 2 — split into 3×3 blocks of ≈106 correlation px), the **axial 1-D projection phase correlation** `calib_pc1d` (each block projected along the excitation axis, whitened cross spectrum, three-point parabolic sub-pixel peak) and the per-frame block statistics `calib_axis_stats` (stationary-cluster rejection at 0.5× the largest block shift → median displacement plus response/spread quality, with the pre-rejection median kept for the log), the per-frame `CalibSampler` and `persist_calibration` (atomic script write-back under the VAR name the caller passes — one name per output mode; a line written as the template's `${VAR:-…}` guard keeps its guard, only the default slot's value changes, and a trailing inline comment survives). The header carries the measured 1-D-vs-2-D comparison that chose the projection (0.90 vs 5.19 ms/frame, ±0.01 vs −0.04…−0.15 px on real signal texture, 0.54 vs 0.31 peak at a 60 px shift, identical HUD rejection and cross-axis leakage — the same comparison's definitions are reproduced on synthetic frames by `build/calib_test`'s `[3]` section) and the reliable-shift bound (half the block's screen-domain width = 106 px/frame). Capture-device resolution lives in the capture layer (`io/hdmi_in.h`), not here |
+| `src/core/detect.cpp/.h` | the portable half of detection output: the minimal tensor shape/element-type description, output-layout parsing (rank 2/3 attribute tables and the rank-4 unfolded DFL head), the class-count rule and the four decode paths + NMS. **No platform dependency and no backend header** — it consumes bare `float` tensors. `anchor_count(S) = Σ(S/8)²` over three levels; `head_kind` decides by **physical geometry first** (num==3G → YOLOv5, num==G → YOLOv8-11), falling back — only when geometry is absent — to "attributes last and exactly 6 → end-to-end proposal table", else the objectness distinction against the configured class count |
+| `src/core/state.cpp/.h` | shared globals: system constants (`DEFAULT_FREQ`, `CAP_SIZE`, `FOV_RADIUS`, `HOT_CTL_PORT`, `TICK_MS`), `ms_to_ticks` (durations are wall-clock, ticks are derived), the **pull-speed ratio scale** (`spd`: integer, 100 = baseline, effective sensitivity = baseline/k — the single definition point of the hid per-axis effective `s` (`s_hid_now`), of the pad full-deflection screen speed (`gain_pad_eff`), of the clamp both entry points use, and of the ADS-pair switch with its exported key state `g_ads_down`), `TargetState`/`CountsHistory`/`MouseState`, hot-param & calibration atomics (`g_calib_collect`/`g_calib_request`/`g_calib_done`/`g_padcalib_request`), time helpers, async save queue, signal |
+| `src/core/control_test.cpp` | `build/control_test` unit test (built and run by `compile.sh`): the pull-speed ratio's landing points — spd=100 is the baseline (1 count = 1 px at the hid base), per-axis independence, the ADS pair switching on the very tick the right key is held, and the three consumers (injection, in-flight compensation, the estimator's own-motion conversion) sharing one per-axis effective sensitivity; plus the clamp band and the hot-param path, and the calibration write-back — the whole file compared byte for byte: the value lands in the caller's VAR, the `${VAR:-…}` guard form and its inline comment survive, a bare line is rewritten bare and a missing line is appended |
+| `src/core/detect_test.cpp` | `build/detect_test` unit test (built and run by `compile.sh`): layout parsing against the four real exported shapes, "the anchor count comes from the model's geometry" (the measured 2100/1344/3549/8400/10647 relations), the class-count rule and its fallback path, hand-computed expectations for each of the four decode branches, the DFL head's distribution expectation, and NMS |
+| `src/io/hdmi_in.cpp/.h` | the capture layer for the board's HDMI RX: bare V4L2 MULTIPLANAR, zero copy (`mmap` + `EXPBUF` dmabuf), device resolved by node name (`hdmirx`) and re-checked against the driver's own `VIDIOC_QUERYCAP` self-description, format/stride/sizeimage taken from the driver and never recomputed, `STREAMON` only after the timing lock, the `low_latency` sysfs switch written before `STREAMON` with read-back verification, **dma-fence gating** (in low-latency mode `DQBUF` returns before the payload is complete — the fence on `buf.timecode.userbits` is the completion credential, and each frame's fd is closed), **newest-frame delivery** (drain the queue after `DQBUF`, keep one frame, return the rest; the supersede counter is the visible cost) with `HdmiDelivery::QueueOrder` kept as the measuring counterpart, and **lock-loss / stall detection with rearm** (a poll slice with no frame plus a failed `QUERY_DV_TIMINGS` = signal gone, detected within one slice rather than one full poll budget; the whole poll budget or a fence-timeout streak = stream stopped; both rebuild the session, failures are retryable so "source not powered" and "device broken" behave the same — keep waiting, never take the process down). Timestamps are checked once per session to be `CLOCK_MONOTONIC` (the whole latency metric depends on it). The measured blocks (frame rate, delivery latency split into fence wait + userspace overhead, newest-vs-queue frame age, the four-format buffer-size rule, the failure→rearm walk-through) live in the two headers with their reproduction commands |
+| `src/io/rga_pp.cpp/.h` | the RGA crop/format stage: the **centre 1:1 crop** of the captured dmabuf into a `dma_heap/system` destination (RGA and CPU share the same buffer), one `improcess()` per crop, no scaling (srect and drect are the same size — asserted as an invariant). The canonical window is `CAP_SIZE` (640) on a side; a smaller model input is a **second** centre crop of that window, produced by the same call with a different source. Buffer sizes follow one rule (source geometry in V4L2's units: bytesperline converted to a pixel stride, `sizeimage` as the whole frame), which makes the RGA-required size exactly the driver's `sizeimage` for all four formats. Destination buffers are `dma_heap/system` (cache-invalidate after each write, since that heap's CPU mapping is cached while RGA writes by DMA); allocation failure is a hard error, never a fallback to userspace memory. `wrapbuffer_fd_t` is called explicitly rather than through the variadic form so a geometry mistake cannot compile silently. The measured per-geometry cost and the byte-for-byte comparison against a CPU reference are in the header |
+| `src/io/npu_axcl.cpp/.h` | the AXCL (AX650N card) inference session and one tick: a **synchronous H2D → execute → D2H** path only (an async call followed by a sync one on the same context segfaults, RC=139, so the two paths cannot coexist and the tick's cost is the sum of the three segments). **Input contract: U8 / NHWC / RGB `[1,S,S,3]`, `S ∈ {256,320,416,640}`** — the converted models carry dequantise → normalise → transpose themselves, so the host feeds raw RGB bytes; the contract is **read from the runtime's own description** at `open()` (dims + dtype; the runtime's `layout` field contradicts its `dims` and is logged only), and the channel order was confirmed by comparing the dumped input tensor against the original ONNX's input convention (cosine similarity 0.9989 RGB vs 0.9950 BGR). Only outputs whose layout parses (rank 2/3 grid/proposal tables, rank 4 unfolded DFL heads) get host staging and a per-frame D2H; the rest get device buffers only (execute requires one) and **not a byte crosses PCIe**. The header states the measured numerical property of self-converted outputs — coordinates and confidences share one quantised tensor, so the codeword length becomes the confidence resolution (apex 1.4915, codwz 1.6453, Z320 1.3031, Dawan 1.2502, R6 3.4864; R6's whole objectness/class channel lands on code 0 → 0 candidates in this layer against 7765 candidates >0.5 from the same input through the original ONNX, while the public HuggingFace DFL model is unaffected at a codeword of 0.21). The values are taken as they come — no compensation — and `model_probe` prints the codeword and the score-channel range into the acceptance output; the conversion-side fix is to split the head into two tensors, one per range. Buffers are allocated once and reused per frame (per-frame allocation would inject jitter into the control loop), and the input is packed into host memory first so the H2D source never depends on someone else's cache maintenance. The transfer-size sweep's least-squares fit (H2D 105–138 µs + 1854–1865 µs/MB, D2H 74–86 µs + 1494–1508 µs/MB, residual ≤7.2%) gives the budget's fixed cost and per-byte rate |
+| `src/io/capture.cpp/.h` | capture/inference orchestration: frame (io/hdmi_in) → RGA crop/format (io/rga_pp) → one NPU tick (io/npu_axcl) → translate detections back into the window domain → NMS → FOV target selection → `estimator_step` publishes `g_target`; plus the calibration sampling path (the whole inference chain is skipped while `g_calib_collect`), the three-source screenshot collection and the preview. Defines the **coordinate domain**: the canonical window is the centre 1:1 crop with side `W = max(CAP_SIZE, model side)`, and a smaller model input is a second centre crop whose translation back is `(W − model_side)/2` — one conversion, in one place. A 640 BGR window is produced **on demand** (only a screenshot, a calibration round or an open preview needs it), so the steady state is one RGA crop per frame. `src_fps()` carries the receiver's locked timing to everyone who needs a frame-length scale; `SRC_FPS_DEFAULT` covers only the window before the receiver opens. **Source loss never ends the process** (the signal is an external condition, and only a live process can be there when the picture returns); an unopenable inference chain is a configuration fact and ends the run. Log lines the panel parses are a contract: `模型: <arch> <side>x<side>[ <classes>类]`, `[AI FPS] …`, `采集统计: fire=… det=… auto=…`, `收帧统计: …`, `[HDMI] …`, `[SAVE] …`, `[标定] …` |
+| `src/io/calib_run.cpp/.h` | **the shared calibration engine for all three output modes** (one measurement method, one state machine, one fit — a mode supplies only the excitation plan, the injection units and the write-back VAR name; the deliverable is `L` only): the plan table (`cal_plan`, hid = 2 pairs × 2 axes, pad = 3 pairs × the horizontal axis, signs alternating so the picture returns to its start, every excitation followed by a 300 ms zero-command pause), the segment-window table, the online travel accumulator (`cal_note_sample` → `g_cal_live_travel`/`g_cal_live_slot`, read by the state machine's to-target stop rule), the fit (`cal_fit`), the diagnostics and the write-back — the observation model, the three readings, every gate's source and the state machine are stated in the "Calibration" section below. The 1 kHz tick of that mode (`cal_step`) plays the plan, aborts an axis after two consecutive timeouts while keeping its pauses as the σ pool, and ends with nod/shake; success writes **the caller's delay VAR — `HID_L_EST` (hid) / `PAD_L_EST` (pad) / `P5G_L_EST` (p5g): one slot per output mode, so pad and p5g share the excitation plan but never each other's delay** |
+| `src/io/usbraw.cpp/.h` | raw_gadget session carrier: sysfs two-level UDC name discovery (the gadget name is read from the sysfs uevent — the platform driver's name and the gadget name are not the same string, and binding with the wrong one is refused by the kernel) → INIT/RUN/VBUS_DRAW (the VBUS request is the configuration's `bMaxPower`, uapi unit 2 mA); the ep0 standard-request table (descriptors truncated to `wLength`, status/configuration/interface/feature; OUT or zero-length SETUPs closed through EP0_READ), device-specific requests answered by an optional per-device hook, unanswered ones STALLed — an unanswered SETUP would leave the kernel's ep0 stage pending and fail every later control transfer of the session; the interrupt-IN **latest-report slot** send thread (EP_WRITE length = submitted length — a short packet is a packet boundary) and an optional interrupt-OUT receive thread (EP_READ blocking, packets have no consumer and are dropped). Report rate = min(tick rate, host service rate) — the slot holds one state, not a queue, so the host sees exactly one report per report the producer submitted and no submission can turn into two host-visible reports, while a producer faster than the host has its extra submissions coalesced. Every 60 s the send thread prints **both layers** of that rate — submissions/s (the device-side production cadence) and write completions/s with their mean interval (the cadence at which the host takes reports) — under the device's own tag (`[USB-HID]` / `[PAD-USB]`); equal numbers mean no backlog, a lower completion rate means the host's polling ceiling (endpoint `bInterval` × enumeration speed) or host scheduling is the bottleneck. The same line carries the OUT received count: it is the existence observable for the host's own commands (LED/force-feedback traffic is real and low-rate). The 60 s window is reopened when a gap (disconnect / suspend / the host pausing its polling) exceeds 100 ms, so a pause is never counted as slow polling. Session parameters come from the device definition: enumeration speed (which sets the time unit of the endpoint `bInterval`), device qualifier (nullptr = none, that GET_DESCRIPTOR STALLs — the spec behaviour of full-speed-only devices; a high-speed device answers it), VBUS request, descriptor set, endpoint set and class-request semantics. The OUT endpoint's enable/retire handshake is the kernel's own constraint: EP_ENABLE needs the endpoint disabled and no request in flight (`urb_queued` → `EINVAL`), and only the reading thread can observe an in-flight request end, so retirement wakes the reader, waits for it to leave the read, then disables — an enabled-but-unread OUT endpoint NAKs the host's command transfers forever. Shutdown wakes the threads blocked in endpoint ioctls with a no-op signal: those in-flight ioctls hold a file reference, so closing the fd alone cannot drive the UDC release. An open failure names its two causes separately (module absent / permissions) with the `scripts/setup_platform.sh` reminder, and `EBUSY` on RUN prints the UDC-vacating reminder |
+| `src/io/hid_mouse.cpp/.h` | real-mouse input and USB mouse identity: evdev read (EVIOCGRAB; device picked by `-D`, default = lexicographically first `*-event-mouse` so the choice is deterministic, an explicit substring matching several nodes is an error listing the candidates, an absolute `/dev/input/eventN` path is taken as-is — which is how a uinput synthetic mouse is selected) + the USB mouse device definition (device/config/report descriptors — the report descriptor is the single source of truth for the 9-byte report layout; the identity is the kernel's generic gadget IDs `1d6b:0104` — a mouse is bound by HID class on every host, so a vendor identity would carry no information, and this one is the identity the deployment host's HID stack is already bound to, keeping its pointer settings in force) + per-tick report assembly submitted into the raw_gadget session's latest-report slot (control counts merged via the overlay callback) |
+| `src/io/pad_input.cpp/.h` | gamepad input: evdev gamepad read (`-P` by-id substring, falling back to a name+capability scan over `/dev/input/event*` because uinput/Bluetooth pads have no by-id node), capability bitmap verified per device (axis family `RX/RY` vs `Z/RZ` chosen from the bitmap, trigger axes from the same bitmap, ranges from absinfo — nothing hardcoded), Xbox-layout `PadLogical` state, disconnect self-heal (clear keys + 1 s reopen retry, non-blocking at startup), and the **sibling event nodes**: every `/dev/input/event*` whose `EVIOCGID` VID:PID matches the joystick node's is opened too and only its `EV_KEY` events are consumed through `pad_extra_key_bit` (measured: the G7 Pro exposes joystick + keyboard + mouse from one USB device and its share/upload button emits `KEY_SYSRQ` on the keyboard node with the joystick node seeing nothing at all, so reading the joystick node alone silently loses it). The P5 General dongle's own node is excluded from the candidates by VID/PID (`0x2B81:0x0101`) — it is the p5g mode's authentication peripheral, not a human channel. The **8-bit→16-bit mapping** is a uniform-step expansion table (midpoint exactly 0, 254 steps of 258 plus one endpoint-absorbed step of 1) with an independently written golden table in the unit test — see "Pad mode" below for the rule and its numbers |
+| `src/io/pad_output.cpp/.h` | the gamepad merge layer (shared by both gamepad output backends): law velocity → right-stick injection conversion `d = v·1000/A_eff` per axis with `A_eff = gain_pad_eff(spd_axis(ads, axis))`, merge with the human stick and radial clamp to the full-scale circle, the stick ledger `Σ(deflection·ms)` (the pad counterpart of the `g_counts` invariant: what the game actually received) with its per-axis ledger→pixel factor `s_rp = A_eff/(32767·1000)`, the `own_motion_ledger`/`own_motion_scale` mode routing (hid = `g_counts` × per-axis effective sensitivity, pad = the stick ledger × per-axis `s_rp`), the `g_pad_publish` latest-slot publish point the output backend polls, the **per-axis speed cap** `min(-x, A_eff/1000)`, the 1 kHz pad tick (snapshot → RT/LT trigger word → **calibration step** (`io/calib_run.h`; while a round runs the excitation owns the whole pad — `pad_excite` writes the excitation on the right stick and centres the human share of both sticks *and* both triggers, keeping the button word so L3/R3 still reach the game: a held left stick translates the whole picture and a trigger can put the game into an aiming state, either of which changes the very response being measured, and neither shows up in the pause windows where σ is read → law velocity → merge+ledger → publish) and `--pad-dump` (a `[PAD]` line every ≥50 ms: the merged state plus `fire`/`ads`/`aim_gate` — during a round it traces the excitation waveform) |
+| `src/io/pad_xinput.cpp/.h` | pad-mode output backend: the wired Xbox 360 pad's device bytes (`0x045E/0x028E`, vendor interface FF/5D/01, interrupt IN 0x81 + OUT 0x02 both 32 B, the 16-byte `0x21` vendor descriptor Windows' enumeration needs, no HID report descriptor) and the 20-byte input report encoder (explicit `u8[20]`: header `00 14`, int16 LE sticks, 0–255 triggers, button bits; the wire's Y is up-positive while `PadLogical`'s is up-negative) plus the report loop submitting every control tick into the session's latest-report slot. **Enumeration speed and endpoint `bInterval` together are the terminal refresh rate** (USB 2.0 §9.6.6): the shipped pair is **high speed + `bInterval=4`** (`2^3` microframes = 1 ms = 1000 Hz), with the device qualifier a high-speed device must answer; the device-definition header carries the measurement that pins the pair (a full-speed `bInterval=1` definition declares the same 1000 Hz ceiling and completes writes at the same rate, but the host's XInput *state* does not follow it, while the high-speed definition matches field for field). The OUT endpoint is enabled and drained so the host's own LED/force-feedback commands have a consumer — an enabled-but-unread OUT endpoint makes those transfers time out. **The serial number is derived per machine** (FNV-1a-64 of `/etc/machine-id`, falling back to the dbus machine id then the hostname → 12 uppercase hex digits): the host derives its device instance id from it, so a fixed public constant would both collide across units and hand out a recognisable device fingerprint; derived-not-random keeps one identity across reboots and re-plugs, and the derivation excludes the descriptor bytes because a definition change does not need a new instance (the host re-reads the descriptors on every arrival) |
+| `src/io/pad_p5g.cpp/.h` | p5g-mode output backend (PS5): the board presents the **P5 General dongle-shaped device** (0x2B81/0x0101, full speed, single HID interface, interrupt IN 0x82 64 B @1 ms + OUT 0x01 64 B @6 ms, 165-byte report descriptor — a byte-exact clone of the GP2040-CE reference firmware's descriptors, every constant documented in `docs/p5general/`) and drives the **real dongle** plugged into a host port via its hidraw node (`/sys/bus/hid/devices/0003:2B81:0101.*/hidraw/*`: interrupt IN = read, interrupt OUT = write, feature control transfers = `HIDIOCS/GFEATURE`). The PS5's auth handshake is forwarded verbatim (SET_REPORT 0xF0 challenge → dongle; GET_REPORT 0xF1 signature/nonce and 0xF2 signing state ← dongle; the reference state machine's dispatch table — f1 quotas 4/1/0 by challenge type, the +500 ms auto-F2, the one-GET-behind read semantics, the idle-only F0 acceptance — is followed rule for rule), and the signing pipeline submits every merged report to the dongle and sends the PS5 **only the bytes the dongle returned** (change-driven + 4 repeats + a single report in flight, all reference rules; the reference's drop-on-backpressure branch is realized structurally rather than exercised: a returned report goes straight into the session's latest-report slot, which overwrites rather than queues, so nothing accumulates to drop). Three deliberate deviations from the reference, all robustness additions that keep the protocol semantics: a failed transfer abandons the round to idle instead of hanging in a wait state forever (the reference's documented dead end — the PS5's own timeout re-sends the challenge and the round restarts), dongle loss closes the hidraw and rescans on a 1 s cycle (the reference never resets its state machine on unplug), and the signature round trip carries a 500 ms watchdog — the same budget the reference firmware grants the dongle for its auto-F2, i.e. its own longest explicit wait. The ep0 class-request segment routes to the device's hook (see `usbraw`): GET_REPORT(0x03) answers the 48-byte static definition, unknown feature IDs STALL. Watchdog-free of tuning knobs: every timing constant cites the reference's own 500 ms dongle budget; the trigger's wire digital bit gates at 16/255 (first whole value above the measured G7 Pro trigger flat of 15/255 — the same measurement the `padthr` default cites), the analog value itself passes through untouched |
+| `src/io/pad_test.cpp` | `build/pad_test` unit test (built and run by `compile.sh`): the 8-bit→16-bit mapping (neutral exactly 0, endpoints exactly ±32767, monotone, centred devices passing through, trigger scaling), the injection/merge geometry (linear per-axis `v/A_eff`, radial clamps, the ledger booking the post-clamp value and its unit identity with `s_rp`), pass-through 1:1, the trigger threshold and `-k` gate, the **per-axis speed cap** `min(-x, A_eff/1000)` (saturating command landing exactly on the cap, per-axis independence, the cap moving with the ratio), the ledger routing and per-axis `own_motion_scale` (including the ADS pair switching), the publish-point contract, the XInput wire format (header, button bit tables, trigger pass-through, int16 LE assembly and the Y convention, the touchpad bit having no XInput landing spot) and the device bytes (identity, 48 B configuration, the `0x21` blob, both endpoints, the qualifier, high-speed enumeration, the poll-rate derivation `8000 >> (bInterval−1) = 1000 Hz`, the 20-byte report fitting one packet, the derived 12-digit serial, and the configuration's endpoint bytes matching the `EP_ENABLE` descriptors byte for byte); plus the **P5G side**: the 8-bit wire map's round-trip identity over all 256 codes (with the rejected `(v+32768)>>8` form's 127 failures counted beside it), the injection landing (`floor(inject/258)` whole steps, hand-computed expectations, floor/arithmetic-shift rounding at the step boundary, both merged-clamp ends), the 64-byte report encoding byte by byte, the device bytes (identity, 41 B configuration, both endpoints, the 165-byte report descriptor's structural anchors across its whole length, the 8-bit stick declaration at its exact offsets, the hook, the `PAD-USB` rate tag), the auth state machine on a synthetic dongle (verbatim forwarding, the 4/1/0 dispatch table, auto-F2 timing, one-GET-behind reads, idle-only acceptance, failure-abandon recovery, reset and absent-dongle semantics) and the signing pipeline (change-driven submits, repeat quota, single in-flight, drop-on-backpressure, the pending watchdog); plus the sibling-interface key translation and the 8/16-bit resolution comparison, and the absent-device path (non-blocking, no report) |
+| `src/core/calib_test.cpp` | `build/calib_test` unit test (built and run by `compile.sh`): sampling geometry invariants (centred unscaled crop, scale factor, correlation-domain size, reliable shift bound, edge quantization floor), the block statistics on synthetic frames (injected-equals-recovered, a stationary HUD majority hijacking the plain median to ≈0 while the rejected median stays exact, a minority of static blocks, the single-outlier fallback, the scale-free rejection threshold, the untextured-frame path), the 1-D-vs-2-D comparison (both implementations, error and cost), the state machine (plan shape and amplitudes, the trigger hold, the start cross not sampling, the to-target stop, the unresponsive-axis abort and its bounded round length, the printed plan span vs the trigger-inclusive historical depth, the pure-pass-through reset, the per-round verdict reset, the `padcalib` re-entrancy drop) and the **synthetic closed-loop e2e** — a virtual game with a known `L` (optional first-order lag, detection noise, dropped frames, 60/120 fps, and a per-axis `L` so the two axes can disagree) driven through the real state machine and fit, printing and asserting each case's deviation and scatter, including the two two-axis chains (a 30 ms axis difference fails the round on the tail family's dispersion gate while both per-axis medians are still reported; a 4 ms one succeeds with the written value at the whole-round median) — plus the honesty paths (frozen screen, noise-only screen, a tail longer than the pause → a failed round, no write-back, the script's VAR untouched) and the three output slots (a successful round writes `PAD_L_EST` with its guard intact while the other two slots stay byte-identical, and the p5g name lands in its own slot) |
+| `src/io/hdmi_test.cpp` | `build/hdmi_test` unit test (built and run by `compile.sh`): the capture layer's **fail-direction** predicates — which failures need a rebuild and which are just a dropped frame, the consecutive-fence-timeout line (queue depth − 1), the rearm cadence, and the derivation relations between the constants. It touches no device: the real lock-loss → re-lock → picture-returns walk is accepted by `build/hdmi_probe` and by the `[HDMI]` lines of a live aimbot run |
+| `src/io/hotctl.cpp/.h` | UDP hot-parameter channel 127.0.0.1:47700 (`hotctl_apply` is the pure key/value apply step — testable without a socket) |
+| `scripts/compile.sh` | the board build: g++ per-TU objects into `build/`, `bin/aimbot` linked from them, then the **five** unit tests (`control_test`, `pad_test`, `calib_test`, `detect_test`, `hdmi_test`) and three probes (`hdmi_probe`, `model_probe`, `pipeline_probe`) — the tests are run by the script and a failing assertion aborts the whole build; the probes are built but not run (they need root, the card and a live signal). axcl and librga are the deployment machine's system libraries; `scripts/setup_platform.sh` provides the latter and verifies the former |
+| `scripts/setup_platform.sh` | the single platform-setup entry point, called by both the launcher template and the panel before every start, idempotent and safe to re-run: librga (fetch upstream → verify the pinned `1.10.6_[3]` from the header macros **and** from the version string compiled into the prebuilt `.so` → install to `/usr/local` → read back and verify) + raw_gadget (module load, `/etc/modules-load.d/raw-gadget.conf` persistence, `/dev/raw-gadget` permissions, vacating the UDC) + axcl (verify the `/usr/lib/axcl` libraries and `/dev/axcl_host`; a missing node is retried once with `modprobe axcl_host`). Failure anywhere aborts with the reason, because the firmware cannot start without them; the script also reports the `/dev/rga` state, which RGA jobs need |
+| `scripts/game/template.sh.example` | Per-game launcher template — copy to `<game>.sh` (`.example` keeps the panel from listing it as a launchable profile). Relative paths; calls `scripts/setup_platform.sh` first; output-mode switch `OUTPUT_MODE` ∈ {hid, pad, p5g} (hid expands `-D`, pad/p5g expand the same `-M <mode> -P -T` and `PAD_DUMP="y"` adds `--pad-dump` — the two gamepad modes differ only in that one value); mouse-takeover switch `AIM_ENABLED` and screenshot-collection switches (`CAPTURE` master + per-source `CAP_FIRE`/`CAP_DET`/`CAP_AUTO`); **three slots of five VARs** — `HID_*`, `PAD_*`, `P5G_*` — each holding that mode's delay (`<mode>_L_EST`, the calibration's write-back target) and its four pull-speed ratios (`<mode>_SPDX`/`_SPDY`/`_ADS_SPDX`/`_ADS_SPDY` → `--spd`/`--ads-spd`, integer, 100 = baseline) with the scale, the per-slot baseline (`hid` = 1.0 px/count, `pad`/`p5g` = 3000 px/s full deflection) and the swap rule explained in the file: the `case` takes the current mode's slot, so switching `OUTPUT_MODE` switches delay and ratios together and the three sets never mix; the ratios are manual entries the firmware never writes; every manual VAR is guarded (`${VAR:-default}`) so a script missing any of them still launches; the `MAX_SPEED` rule and its derivation live in the file. `CAM_DEV` takes a `/dev/videoN` path only (empty = the firmware resolves the receiver by driver name) and there is no frame-rate knob — the capture rate is the signal's |
+| `scripts/test/hdmi_probe.cpp` | the capture layer's board acceptance probe: resolve the device → print the locked timing and format → capture N frames (default 600) and report the measured frame rate, the delivery latency split into fence wait and userspace overhead, the per-geometry RGA cost, drops, sequence gaps and ERROR returns → compare the crop against a pure-CPU reference written on the mmap'd capture buffer, byte for byte → dump PNGs for the eye. Flags: `--fifo` (queue-order delivery, the counterpart that measures what newest-frame semantics buy), `--slow <ms>` (simulate a consumer that cannot keep up), `--no-fence` (measurement only — reproduces "the payload is still being written when the frame is handed out"), `--dump <dir>`. It rebuilds on lock loss exactly as the production path does, so one long run *is* the lock-loss → re-lock → recovery acceptance. Run: `sudo ./build/hdmi_probe 600` |
+| `scripts/test/model_probe.cpp` | the NPU acceptance probe for one `.axmodel`: print the runtime's **IO contract** per tensor (name/shape/element type/bytes/role — is the input U8 NHWC RGB, which outputs are kept and which are skipped and why), optionally run a real image through the whole chain (letterbox → RGB → H2D → inference → D2H → decode → NMS) and dump both the input tensor actually fed and each kept output's raw bytes for byte-level comparison elsewhere, report each kept output's **numerical measurement** (codeword length and score-channel range), and print the per-segment latency percentiles and the equivalent bandwidth over N iterations. `--xfer-sweep` does only the transfer-size sweep (percentiles per size + least-squares fit and residual), the foundation of the latency budget. The geometry matches AXERA's reference sample pixel for pixel; the channel order is the one deliberate difference (the reference feeds BGR, this repository's converted models carry an RGB contract). Run: `sudo LD_LIBRARY_PATH=/usr/lib/axcl ./build/model_probe engine/<model>.axmodel --image <jpg>` |
+| `scripts/test/pipeline_probe.cpp` | the capture → NPU end-to-end probe: runs the **production path itself** (`io/capture`'s `CapturePipeline`) against the live signal for the frame rate and per-segment cost, then pastes a real image into the centre window of one real capture buffer and pushes it through the same chain, dumping the window and annotated PNGs. Needs root, the card and a live signal |
+| `scripts/test/uinput_pad_test.py` | gamepad-mode e2e on the board: synthesizes a virtual Xbox-layout gamepad via uinput (xpad-style axes, deliberately unlike the G7 Pro's HID-style bitmap, covering the axis-family branches) and asserts passthrough 1:1, trigger scaling, fire/ads gating, dpad, unplug/reconnect recovery against the aimbot's `--pad-dump` output (pure stdlib, run under sudo) — the dump reads the publish point, which is backend-independent, so the same assertions cover the whole input/merge chain and both gamepad backends (`--mode pad\|p5g`) |
+| `scripts/test/uinput_calib_test.py` | calibration e2e on the board (pure stdlib, run under sudo): synthesizes the mode's trigger device (`--mode hid` = a virtual mouse whose `BTN_SIDE`+`BTN_EXTRA` are the side-key pair; `--mode pad\|p5g` = a virtual pad triggered with L3+R3) and drives one full round against the live signal, then asserts the four things a round must show — the trigger line, the plan playing with per-segment evidence, `--pad-dump` proving the pad is owned by the excitation (right stick deflecting, left stick and both triggers centred, L3/R3 still passing through), the round's measured sampling rate / capture rate / no-sample fraction / per-frame sampling cost, and the verdict with its write-back rule. A static screen (no game) is the expected failure here, and that is the assertion that matters most: the round must say why and leave the profile script byte-identical |
 | `scripts/test/xinput_probe.ps1` | Windows-side verdict probe for the emulated pad: P/Invoke `xinput1_4.dll!XInputGetState`, polls the four user slots printing rc / packet number / decoded buttons+sticks+triggers (rc=1167 = slot empty; rc=0 with a rising packet = live device) — the acceptance instrument for "the host really is an XInput pad" (ASCII-only source so PowerShell 5.1 parses it without a BOM) |
 | `scripts/test/pad_key_probe.py` | evdev key probe for the physical pad (pure stdlib, run under sudo, **with the aimbot stopped** — the reader owns the node via EVIOCGRAB): prints every `EV_KEY` code with its kernel name and whether `pad_input`'s table already maps it, so an unmapped button can be identified before it is wired to a logical bit; also flags the node itself (a pad's extra buttons can ride a second interface) and, with `--raw`, dumps `EV_ABS` |
-| `scripts/game/template.sh.example` | Per-game launcher template — copy to `<game>.sh` (`.example` keeps the webui from listing it as a launchable profile). Relative paths; output-mode switch `OUTPUT_MODE` ∈ {hid, pad, p5g} (hid expands `-D`, pad/p5g expand the same `-M <mode> -P -T` and `PAD_DUMP="y"` adds `--pad-dump` — the two gamepad modes differ only in that one value); mouse-takeover switch `AIM_ENABLED` and screenshot-collection switches (`CAPTURE` master + per-source `CAP_FIRE`/`CAP_DET`/`CAP_AUTO`); **three slots of five VARs** — `HID_*`, `PAD_*`, `P5G_*` — each holding that mode's delay (`<mode>_L_EST`, the calibration's write-back target) and its four pull-speed ratios (`<mode>_SPDX`/`_SPDY`/`_ADS_SPDX`/`_ADS_SPDY` → `--spd`/`--ads-spd`, integer, 100 = baseline) with the scale, the per-slot baseline (`hid` = 1.0 px/count, `pad`/`p5g` = 3000 px/s full deflection) and the swap rule explained in the file: the `case` takes the current mode's slot, so switching `OUTPUT_MODE` switches delay and ratios together and the three sets never mix; the ratios are manual entries the firmware never writes; every manual VAR is guarded (`${VAR:-default}`) so a script missing any of them still launches; the `MAX_SPEED` rule and its derivation live in the file |
-| `scripts/test/p5g_dongle_probe.py` | P5 General dongle bring-up probe on the Jetson (pure stdlib, run under sudo, read-only plus one OUT write — it never enters the auth handshake): enumerates the dongle's `/sys/bus/hid` form and bound driver, dumps its own HID report descriptor to `/tmp`, exercises the three feature control transfers (0x03 device definition / 0xF1 signature / 0xF2 signing state), then times the signing round trip (interrupt OUT write → interrupt IN return) over 8 submissions and prints the mean/fastest latency and the implied continuous-input ceiling. It also reports the raw_gadget + UDC readiness of the device port. Answers, on real hardware, the questions `docs/p5general/` §10 could only bound from the code |
-| `docs/p5general/p5general-protocol.zh-CN.md` / `.en.md` | The P5 General wire protocol as the authority for every constant in `io/pad_p5g`: a line-referenced transcription of the GP2040-CE reference firmware (`P5GeneralDriver.cpp`, the descriptor arrays, the auth listener state machine) plus the hardware-verified descriptor bytes, the 64-byte input/output report layouts, the feature-report sequences and the §10 list of what the code alone could not settle (with the probe's measured answers) |
-| `arena/` | Pure-Python control-law simulation evaluator (neutral simulator + 13 laws + standard + FPS test suites); see dedicated section |
+| `scripts/test/p5g_dongle_probe.py` | P5 General dongle bring-up probe on the board (pure stdlib, run under sudo, read-only plus one OUT write — it never enters the auth handshake): enumerates the dongle's `/sys/bus/hid` form and bound driver, dumps its own HID report descriptor to `/tmp`, exercises the three feature control transfers (0x03 device definition / 0xF1 signature / 0xF2 signing state), then times the signing round trip (interrupt OUT write → interrupt IN return) over 8 submissions and prints the mean/fastest latency and the implied continuous-input ceiling. It also reports the raw_gadget + UDC readiness of the device port. Answers, on real hardware, the questions `docs/p5general/` §10 could only bound from the code |
+| `docs/p5general/p5general-protocol.zh-CN.md` / `.en.md` | The P5 General wire protocol as the authority for every constant in `io/pad_p5g`: a line-referenced transcription of the GP2040-CE reference firmware (`P5GeneralDriver.cpp`, the descriptor arrays, the auth listener state machine) plus the hardware-verified descriptor bytes, the 64-byte input/output report layouts, the feature-report sequences and the §10 list of what the code alone could not settle (with the probe's measured answers in §14) |
+| `webui/` | the browser control panel (FastAPI + vanilla JS): profile discovery from `scripts/game/*.sh`, model discovery from `engine/**/*.axmodel`, receiver discovery from `/sys/class/video4linux` with the live signal state (`v4l2-ctl --all`), the start sequence (`scripts/setup_platform.sh` → `bin/aimbot` with the full parameter set, `-S` pointing at the profile script), hot-param push, the calibration button, compile as an async task and the log stream. `webui/README.md` is the operator manual |
+| `arena/` | Pure-Python control-law simulation evaluator (neutral simulator + 13 laws + standard + FPS test suites); see the dedicated section |
+| `AGENTS.md` / `README.md` | the design document (this file: platform, files, parameters, architecture, invariants, tuning, arena) and its short entry point (platform, pipeline, output modes, build & run, parameter face) |
+| `requirements.txt` | `arena/`'s two dependencies (numpy for Kalman/MPC, scipy for the DARE solve); the firmware itself needs nothing from Python |
+| `.gitattributes` / `.gitignore` | LF enforcement (the board's `bash` rejects CRLF/BOM), and what stays on the deployment machine: `build/`, `bin/`, `engine/`, `dataset/`, `*.axmodel`, the panel's runtime state, `arena/trace_out/` and the private game scripts (only the template is committed) |
 
-Linking note: the calibration's 2-D block-correlation baseline exists only in the unit test (`cv::phaseCorrelate` in `src/core/calib_test.cu`; the sampling side uses `cv::dft`/`cv::reduce`), so `-lopencv_video` is a **unit-test link** requirement, while what `aimbot` itself needs is `-lopencv_imgcodecs` (collection `imwrite`).
+Linking note: the calibration's 2-D block-correlation baseline exists only in the unit test
+(`cv::phaseCorrelate` in `src/core/calib_test.cpp`; the sampling side uses `cv::dft`/`cv::reduce`),
+so `-lopencv_video` is a **unit-test link** requirement, while what `aimbot` itself needs is
+`-lopencv_imgcodecs` (collection `imwrite`).
 
 ## Parameters
 
-**aimbot** (missing `-m` fails fast on a missing engine file; `-c`/`-t`/`-y`/`-f`/`-x`/`-k`/`-v` prompt with a default — `-c` 0, `-t` 0.5, `-y` 65, `-f` 120, `-x` 2000, the last two the same values the launcher template and the webui carry, so an interactive run lands on the same working point as a profile launch; every other flag has a silent default — `-d` → `/dev/video0`, `-r` → 150, `-l` → 60, `-S` → no write-back, `-M` → hid):
+**aimbot** (missing `-m` fails fast on a missing model file; `-c`/`-n`/`-t`/`-y`/`-x`/`-k`/`-v` prompt
+with a default — `-c` 0, `-n` 0, `-t` 0.5, `-y` 65, `-x` 2000, `-k` fire, `-v` n; every other flag has
+a silent default — `-d` → resolve the receiver by driver name, `-r` → 150, `-l` → 60, `-S` → no
+write-back, `-a` → y, `-M` → hid). The launcher template and the panel carry the same `-t`/`-y`/`-x`
+defaults and pre-select `-a y -v n`; they widen the trigger key to `both` (`AIM_KEY`) because a profile
+is per game, while the interactive default is the narrower `fire`):
 
 ```
--m model  -c class  -t confidence  -y height offset  -d capture card (Hagibis/Asus or /dev/videoN)
--f framerate (120/60)  -x speed cap px/s  -l initial L (that mode's calibration writes it back)  -r FOV radius px (default 150)
+-m model  -c class  -n model class count (0 = derive from the attribute count)  -t confidence
+-y height offset  -d capture device (/dev/videoN; default = resolve the receiver by driver name)
+-x speed cap px/s (clamped 100–20000)  -l initial L (that mode's calibration writes it back; 0–120)
+-r FOV radius px (default 150, 10–1000)
 -S write-back script path (calibration replaces the current output mode's delay line:
    HID_L_EST / PAD_L_EST / P5G_L_EST)
 --spd <x>[,<y>] pull-speed ratio per axis — the game's input sensitivity in a percent scale
@@ -159,73 +246,275 @@ Linking note: the calibration's 2-D block-correlation baseline exists only in th
    the correct value puts the loop at its design point, see "Tuning"; hot params spdx/spdy)
 --ads-spd <x>[,<y>] the same pair while the ADS key (right button) is held (hot params adsspdx/adsspdy)
 -a mouse takeover (default y; n = pure pass-through: no injected motion, detection/collection keep running)
--M hid|pad|p5g output mode (default hid; mutually exclusive — pad/p5g read no mouse and never
-   start the USB mouse session, hid never touches the gamepad; each owns the UDC, one at a
-   time; p5g additionally requires the real P5 General dongle in a host port)
+-M hid|pad|p5g output mode (default hid; mutually exclusive — pad/p5g read the gamepad and never
+   start the mouse session, hid never touches the gamepad; each owns the UDC, one at a time;
+   p5g additionally requires the real P5 General dongle in a host port)
 -P pad by-id substring (default empty = any *-event-joystick node; the P5 General dongle's own
    node is excluded by VID/PID)
 -T pad trigger threshold in % of full scale (default 6 = the measured trigger flat 15/255; shared by
    RT and LT, hot param padthr; it gates the aim TRIGGER only — the analog trigger value still
    passes through 1:1, untouched)
 --pad-dump adds the merged logical state to the log at ≥50 ms intervals (debug output on top of the
-   live output); the launcher template carries it as PAD_DUMP="y" (the webui reads the same profile
-   var and passes it through), so the command waveform can be captured from a normal webui launch
+   live output); the launcher template carries it as PAD_DUMP="y" (the panel reads the same profile
+   var and passes it through), so the command waveform can be captured from a normal panel launch
    without touching the CLI — it is how an injection that never reaches the game is told from a law
    that never commands one
--D mouse /dev/input/by-id substring (hid mode; default empty = lexicographically first *-event-mouse;
-   an explicit substring matching several nodes errors out and lists them — a plugged-in gamepad's
-   auxiliary mouse interface matches the default pattern too, so the real mouse gets named here)
--k trigger key (fire/ads/both)  -v preview
+-D mouse /dev/input/by-id substring or /dev/input/eventN (hid mode; default empty = lexicographically
+   first *-event-mouse; an explicit substring matching several nodes errors out and lists them — a
+   plugged-in gamepad's auxiliary mouse interface matches the default pattern too, so the real mouse
+   gets named here)
+-k trigger key (fire/ads/both)  -v preview (y/n)
 ```
 
-(the hid mouse picker belongs to `-D`, the gamepad picker and its trigger threshold to `-P`/`-T`;
-the two gamepad modes share every flag and differ only in the `-M` value)
+**There is no frame-rate flag.** The capture rate is the signal's own property — the receiver's locked
+timing sets it (`src_fps()`), and the only measurable rate is the detection rate on the `[AI FPS]`
+line. The same reason removes any camera-selection vocabulary beyond a device node: this platform has
+one built-in receiver, and `-d` takes a `/dev/videoN` path (anything else is ignored with a note, since
+a by-id node does not exist here).
 
-**Pull-speed ratio scale** (`src/core/state.h` is its single definition point): the ratio is the **pull-speed multiplier and is inverse to the effective sensitivity** — effective sensitivity = baseline / k, `k = ratio/100`. A larger ratio assumes a lower game sensitivity, so the same desired screen velocity emits more counts (a larger deflection) = the crosshair follows faster. Integers step by one percent (`105`, `109`), **100 = the baseline**, and the baseline is the repository's own sensitivity placeholder — the hid base is `1.0 px/count`, and the pad base is `3000 px/s` full deflection, set by the written-down rule "the baseline is the reference title's measured full-deflection screen speed, rounded up": a console shooter's measured 30–70 % deflection levels (193/556/1159/1651/1804 px/s) extrapolate to ≈2600 px/s at full deflection, and 3000 is the next round value — one notch above the speed-cap derivation's 2000 px/s, i.e. the same band. The clamp band is `[1, 10000]` (a typo guard, shared by CLI and hot params); the meaningful band is `5..2000`, i.e. an effective sensitivity of 0.05–20 px/count. Per axis because a game's vertical/horizontal screen-speed ratio is a property of the game (pitch sensitivity is usually lower) and one shared ratio would tie the axes together; the ADS pair switches in as a whole on the tick the ADS key is held, and that key state is exported (`g_ads_down`) so the frame-rate consumers (the estimator's own-motion conversion) use the same state. The ratio lands **in the effective sensitivity** (not as an output-side multiplier) on purpose: the injection conversion, the in-flight compensation and the estimator's own-motion conversion all consume the same per-axis value, so a ratio change moves the command and its compensation together instead of desynchronizing them. The speed cap (`-x`) keeps its value — it constrains whether the crosshair can keep up with the target's screen velocity, a property of the game, not of the conversion scale.
+**Class count (`-n`)** is needed only by an **unfolded DFL head**, whose attribute count is
+`4·reg_max + classes` and whose `reg_max` is not an observable physical quantity — so it is given
+rather than guessed (the public YOLO11 export is 80). A grid head derives its class count from its own
+attribute count, and `-n 0` means "derive". Without it a DFL output is simply not decoded.
 
-Hot params: the binary opens a localhost-only UDP control channel (127.0.0.1:47700, `key=value;...`); the webui pushes whitelisted params (`t`/`y`/`x`/`fov`/`padthr`/`spdx`/`spdy`/`adsspdx`/`adsspdy`/`k`/`aim`/`cap_fire`/`cap_det`/`cap_auto`, clamped firmware-side, plus the one-shot `padcalib=1` round request) into the running process without restart — protocol in `webui/README.md`. Structural constants stay compile-time.
+**Pull-speed ratio scale** (`src/core/state.h` is its single definition point): the ratio is the
+**pull-speed multiplier and is inverse to the effective sensitivity** — effective sensitivity =
+baseline / k, `k = ratio/100`. A larger ratio assumes a lower game sensitivity, so the same desired
+screen velocity emits more counts (a larger deflection) = the crosshair follows faster. Integers step by
+one percent (`105`, `109`), **100 = the baseline**, and the baseline is the repository's own sensitivity
+placeholder — the hid base is `1.0 px/count`, and the pad base is `3000 px/s` full deflection, set by
+the written-down rule "the baseline is the reference title's measured full-deflection screen speed,
+rounded up": a console shooter's measured 30–70 % deflection levels (193/556/1159/1651/1804 px/s)
+extrapolate to ≈2600 px/s at full deflection, and 3000 is the next round value — one notch above the
+speed-cap derivation's 2000 px/s, i.e. the same band. The clamp band is `[1, 10000]` (a typo guard,
+shared by CLI and hot params); the meaningful band is `5..2000`, i.e. an effective sensitivity of
+0.05–20 px/count. Per axis because a game's vertical/horizontal screen-speed ratio is a property of the
+game (pitch sensitivity is usually lower) and one shared ratio would tie the axes together; the ADS pair
+switches in as a whole on the tick the ADS key is held, and that key state is exported (`g_ads_down`) so
+the frame-rate consumers (the estimator's own-motion conversion) use the same state. The ratio lands
+**in the effective sensitivity** (not as an output-side multiplier) on purpose: the injection
+conversion, the in-flight compensation and the estimator's own-motion conversion all consume the same
+per-axis value, so a ratio change moves the command and its compensation together instead of
+desynchronizing them. The speed cap (`-x`) keeps its value — it constrains whether the crosshair can
+keep up with the target's screen velocity, a property of the game, not of the conversion scale. **The
+ratios are a function of the source resolution**: a pixel is not an angle, so changing the capture
+resolution changes which number is correct — see "Tuning" for the scaling rule and its worked example.
 
-**Parameter face (launcher + webui).** Every per-game value lives in the launcher script and the
-script is the single source of truth: the webui parses the header VAR block on every scan (reading
-the guard's effective value, not its literal text) and writes values back atomically, leaving every
-other line byte-identical. The three output slots are presented as three groups of five rows, of
-which only the current mode's is rendered — switching `OUTPUT_MODE` swaps delay and ratios together,
-and a save submits a patch holding only the current slot's changes (plus whatever else was actually
-edited this time), so saving right after a mode switch leaves the other two slots' ten VARs
-byte-identical. Slot edits left behind by a mode switch are announced at the switch and are not
-submitted. The delay rows are editable like any other value — they are the same VARs the firmware's
-calibration writes back into (`HID_L_EST`/`PAD_L_EST`/`P5G_L_EST`), so a hand-typed delay and a
-calibrated one are one fact; the run page's delay card names the slot in play, and the hot-param push
-takes its ratio keys from the running instance's mode (a save into another slot is a script change
-that takes effect at the next start).
+Hot params: the binary opens a localhost-only UDP control channel (127.0.0.1:47700, `key=value;...`);
+the panel pushes whitelisted params (`t`/`y`/`x`/`fov`/`padthr`/`spdx`/`spdy`/`adsspdx`/`adsspdy`/`k`/
+`aim`/`cap_fire`/`cap_det`/`cap_auto`, clamped firmware-side, plus the one-shot `padcalib=1` round
+request) into the running process without restart — protocol in `webui/README.md`. Structural constants
+stay compile-time.
 
-**Pad mode** (`-M pad`): the physical Xbox-layout gamepad passes through 1:1 (buttons, sticks, analog triggers **with no threshold on the way out**); the aim trigger is RT ≥ `-T` and LT ≥ `-T` (one threshold in % of full scale, shared by both — default 6 % = the measured trigger flat 15/255 rounded up, hot param `padthr`), feeding the same `-k` fire/ads/both semantics as hid. The control law's desired velocity (px/ms) is injected on the right stick **per axis** by the linear conversion `d = v·1000/A_eff` (`d` = deflection fraction, `A_eff` = that axis's effective full-deflection screen speed = `gain_pad_eff(spd_axis(ads, axis))`, see `core/state.h`), and the stick deflection is `d·32767`. The injected deflection is merged with the human stick and radially clamped to the full-scale circle (measured: the device's own travel is a circle — single axes reach ±32767, the diagonal pairs sit at ~0.71 full, and no logged sample exceeded |(x,y)| ≈ 33074 = 32767×1.009; the injection vector uses the same geometry so the law's demanded direction is never rewritten by clamping, and the ledger books the post-clamp value). The effective speed cap is `min(-x, A_eff/1000)` px/ms per axis (full deflection is that axis's physical limit). A stick ledger records Σ(deflection·tick-ms) of what the game receives — the pad counterpart of the `g_counts` invariant — and the estimator/law own-motion compensation source is routed per mode (`own_motion_ledger`: hid = `g_counts`, pad = the stick ledger) together with its ledger→pixel factor (`own_motion_scale`: hid = the per-axis effective sensitivity in px/count, pad = `A_eff/(32767·1000)` px per deflection·ms; the axes must be separate or Y is biased systematically, since the ledger unit is a per-axis deflection). Both the injection and both consumers take their base from `gain_pad_eff`, so the ratio lands in the same effective gain everywhere — see the ratio-scale paragraph above for why that placement is the design and not an implementation detail. The merged logical state is published every tick into the `g_pad_publish` latest-slot (contract in `io/pad_output.h`) — the output backend polls it and must not rewrite the sticks (the ledger already accounts what the game receives). Disconnect/sleep self-heals: keys are cleared and the device is reopened on a 1 s retry cycle, non-blocking at startup.
+**Parameter face (launcher + panel).** Every per-game value lives in the launcher script and the script
+is the single source of truth: the panel parses the header VAR block on every scan (reading the guard's
+effective value, not its literal text) and writes values back atomically, leaving every other line
+byte-identical. The three output slots are presented as three groups of five rows, of which only the
+current mode's is rendered — switching `OUTPUT_MODE` swaps delay and ratios together, and a save submits
+a patch holding only the current slot's changes (plus whatever else was actually edited this time), so
+saving right after a mode switch leaves the other two slots' ten VARs byte-identical. Slot edits left
+behind by a mode switch are announced at the switch and are not submitted. The delay rows are editable
+like any other value — they are the same VARs the firmware's calibration writes back into
+(`HID_L_EST`/`PAD_L_EST`/`P5G_L_EST`), so a hand-typed delay and a calibrated one are one fact; the run
+page's delay card names the slot in play, and the hot-param push takes its ratio keys from the running
+instance's mode (a save into another slot is a script change that takes effect at the next start).
 
-**The 8-bit→16-bit input mapping** (`io/pad_input`, the rule the whole gamepad channel rests on): the log is 16-bit, while the measured G7 Pro reports 8-bit unsigned sticks (`0..255`, rest `128`). A device that already reports a signed centred range passes through unchanged (its own ±32767 domain *is* the logical domain, no table); an unsigned range is expanded by **uniform steps with the overflow absorbed by the endpoint** — midpoint code `c = mn + (mx−mn+1)/2` (8-bit: `0x80 = 128`) → `0`, step `S = floor(32767/(mx−c))` (8-bit: `floor(32767/127) = 258`), `out[c+k] = min(+S·k, +32767)` for `k = 1..mx−c` and `out[c−k] = max(−S·k, −32767)` for `k = 1..c−mn`. The 8-bit family is served at runtime by a **compile-time 256-entry table** built from that rule (`PAD_AXIS8_TABLE`), constructed so that all 255 physical levels are spread evenly over ±32767: 254 of the 255 adjacent steps are 258 and the one short step (1) sits at the very bottom, where the deepest level `128×258 = 33024` would exceed the int16 range and is clamped to `−32767`. The step 258 rather than 257 is the whole point of the shape: `floor(32767/127) = 258` is the largest integer step that keeps all 127 positive levels inside ±32767, while a step of 257 would leave the highest level `32767 − 257·127 = 128` counts ≈ 0.4 % of full scale short of full deflection, and games commonly read *full* deflection to decide sprint/max-turn, so a level short costs a whole state; 258 misses by 1 count instead. The price is that the overflow must land somewhere, and it lands in the deepest level because a game saturates on the deep side anyway. Properties the unit test pins with an independently written golden table: every one of the 256 codes maps to a distinct value, the midpoint is exactly 0 (`out[128] = 0`), the top is `out[255] = +32766`, the bottom is `out[0] = −32767`, the map is monotone, and the step histogram is exactly `{258: 254, 1: 1}`. The naive geometric midpoint `(mn+mx)/2 = 127.5` would instead report rest as +129 counts ≈ 0.4 % of full scale — a standing bias on the human channel. No dead zone is added (the game owns its) and the device-declared flat/fuzz is not applied. Measured and *not* compensated: the G7 Pro's own Y/RZ rest values are 124/125 and 126/128, i.e. the device sits 3–4 counts (≈3 % of full scale) off the nominal neutral — that is a property of the device, this library does not correct it (the game's dead zone absorbs it), and if it ever should be corrected one `absinfo` centre subtraction would do it (no per-device median capture). Keeping the channel 16-bit is also what makes a small aim command meaningful: a 0.5 %-of-full-scale command is 164 counts there (one count = 0.003 % of full scale) against 1.275 counts in an 8-bit domain (one count = 0.39 %), i.e. the latter quantises the command by ≈22 %.
-
-**Pad output** (`io/pad_xinput`): the pad mode's USB side is the emulated wired Xbox 360 pad — the host's own XInput stack sees a device (`XInputGetState` rc=0, packet number rising with the report stream) whose buttons/sticks/triggers are the merged logical state. Bytes and their provenance are the device definition in `io/pad_xinput.cu`; the wire's Y is up-positive while `PadLogical` is up-negative, so the two Y axes are negated at the encoder (the unit test pins both the assembly and the convention). The **terminal refresh rate** is `enumeration speed × endpoint bInterval` (USB 2.0 §9.6.6), and the shipped pair is **high speed + `bInterval=4`** = 1 ms = 1000 Hz, with the device qualifier a high-speed device must answer (USB 2.0 §9.6.2). Measured on the Orin with this host: submissions 1000 Hz, endpoint write completions 1000 Hz (mean interval 1.00 ms), and the host's `XInputGetState` packet advancing ~1000/s with its fields matching the merged state bit for bit (`btns` bit for the pressed button, `LT`/`RT` analog values, `LX/LY/RX/RY` int16 values — a full stick ramp is reproduced step by step). Full speed + `bInterval=1` declares the same 1000 Hz ceiling and completes writes at 1000 Hz as well, but the host's XInput **state** does not follow it (one constant merged state `lx=−32767 / rt=128 / btns=0x0001` read back as all zeros while the packet still advanced) — so the speed/interval pair is pinned by that measurement rather than by the descriptor's arithmetic alone; the OUT endpoint is enabled and drained for the same reason the host's LED/force-feedback commands need a consumer: an enabled-but-unread OUT endpoint makes every host command transfer time out, and the host does write there (the 60 s rate line's OUT counter reads 4 in a measured window). The serial number is derived per machine (FNV-1a-64 of `/etc/machine-id` → 12 uppercase hex digits, falling back to the dbus machine id then the hostname) — the host derives its instance id from it, so a public constant would collide across units and expose a device fingerprint; the derivation excludes the descriptor bytes because the generation experiment (same serial across two definitions) showed the host re-reads descriptors on every arrival and re-binds, so a definition change does not need a new instance, and any residue of earlier instances on the host is inert (the host's stale `045E:028E` entries were verified not to block enumeration).
-
-**P5 output** (`io/pad_p5g`): the p5g mode's USB side, for the PS5. The Jetson enumerates as the P5 General dongle itself (0x2B81/0x0101 — hardware-verified byte-identical to the real dongle in device identity, configuration, endpoints, report descriptor and the 0x03 feature reply) while the **real dongle** rides a host port as the signing co-processor: every merged 64-byte input report is written to the dongle's interrupt OUT endpoint and only the dongle's interrupt IN return (hash and auth_seq_number filled by it) goes to the PS5, so each report on the wire is authentically signed; the PS5's challenge/response handshake travels the feature-report control transfers (0xF0 → dongle, 0xF1/0xF2 ← dongle) through the reference state machine's dispatch rules, and starts only on the first physical-pad input (PS press). Idle is silent on the wire (change-driven + 4 repeats, the reference's rule). Bring-up probe: `sudo python3 scripts/test/p5g_dongle_probe.py` dumps the dongle's own descriptors, exercises the three feature transfers and times the OUT→IN round trip.
-
-**Report rate (a conclusion, not an open item).** The output rate is bounded by the real dongle's signing round trip, not by anything in this repository's control chain, and that bound is acceptable by construction:
-
-- **The bound is measured.** The probe's 8-submission timing gives 2.8 ms mean (fastest 1.5 ms), i.e. `int(1000/mean) ≈ 357 Hz` while every report must round-trip through the dongle — the dongle answers 1:1 and never pushes spontaneously, so a continuously-updated stream is serialized by that round trip. The stdout rate line (`[PAD-USB]`) is not an alternative instrument here: a change-driven flow reopens a >100 ms gap on its own cadence, so the 60 s window it needs never completes (measured under 45 s of driven input: 39 Hz overall, median inter-completion 5.9 ms, 29 gaps >100 ms, longest uninterrupted window 17.9 s), and one probe run is the standing bound.
-- **It does not bound the control law.** The loop is closed through the camera: the crosshair position that the law acts on is sensed at the framerate (120 fps = 8.3 ms/frame), so the pad update rate only has to sit well above the frame rate, which ≈357 Hz does with a factor of ~3 to spare — nothing the law computes is sampled from the pad's report cadence. The signing round trip is a pure transport delay inside the loop, and a constant delay is exactly the quantity calibration measures (p5g's `P5G_L_EST`, one round, which in that mode includes the signature hop), so it is compensated rather than fought. Chasing a higher wire rate would therefore buy no control performance: it would shorten a delay the loop already identifies and cancel.
-- **Consequence for the pad/p5g update path.** The per-tick submission into the session's latest-report slot is overwritten rather than queued (the same latest-slot semantics as every other device here), so a producer faster than the signing pipeline coalesces instead of accumulating a backlog; the pending watchdog (500 ms, the reference firmware's own dongle budget) bounds one stalled round trip and the next submitted state supersedes it.
-
-**Bit width (three-way reconciliation)**: the cloned report descriptor declares **six 8-bit absolute axes** (Usage X/Y/Z/Rz/Rx/Ry, logical 0–255, `Report Size 8 × Report Count 6` at descriptor offsets 25/27 → bytes 1–6), the reference firmware keeps a **16-bit internal state** and right-shifts it by 8 into that field (`P5GeneralDriver.cpp:156`), and `docs/p5general/` §4.1 transcribes both — so the wire is 8-bit and the local 16-bit domain must be folded back into it exactly once. Three deviations from the reference firmware are robustness additions that keep the protocol semantics: a failed transfer abandons the round to idle instead of hanging in a wait state forever, dongle loss closes the hidraw and rescans on a 1 s cycle, and the signature round trip carries a 500 ms watchdog — the reference's own longest explicit wait for the dongle (`io/pad_p5g.cu`'s header carries each one's reasoning). The reference's own fold is exact **because its inbound map is `v×257`** (`map(v, 0..255, 0..65535)`, whose `>>8` inverts it for every code) — but this library's inbound map is the step-258 table (`io/pad_input`), for which `>>8` and `(v+32768)>>8` are **not** the identity: 127 of the 256 codes (all of 1..127, the whole negative half) come back one step short, i.e. the human channel would be silently scaled down. The encoder therefore uses the exact inverse of that table, `wire = clamp(floor(v/258) + 128, 0, 255)`, which reads as "arithmetic shift by one wire step (258 logical counts)" and is the identity on all 256 codes (unit test, code by code, with the rejected form's 127 failures counted beside it). Because every code's logical value is a multiple of 258, `floor((human + inject)/258) = human/258 + floor(inject/258)`: the wire byte is literally **the human's original code plus the injection's own 16-bit amount in whole wire steps** — the human channel passes through unenlarged, only the aimbot's contribution is computed in 16 bits and folded in, which is the landing rule the wire format requires. Rounding is floor (toward −∞, the direction an arithmetic shift takes): an injection of +257 logical counts is still 0 wire counts while −257 already reads −1, a one-sided half-step at the boundary that is reported rather than rounded away (it is 1/255 of the axis's range). Two axes are left with no negation — the wire's stick Y is up-negative, the same convention as `PadLogical` (unlike XInput). The class-request segment of ep0 routes to this device's hook (see `usbraw`): SET_REPORT 0xF0's data stage is read out and forwarded, GET_REPORT 0x03 answers the 48-byte static definition, GET_REPORT 0xF1/0xF2 answer the auth buffer, unknown feature IDs STALL.
-
-Note: structural parameters (PM/ζ/FF_GAIN_VAL/FF_I_GATE/over-compensation and the â-channel constants) are header constants in `src/core/control.h` — see "Tuning".
-
-**Collection options** (enabled with `-o`, otherwise pure aimbot; the three sources are the `-e` list, each also a hot switch):
+**Collection options** (enabled with `-o`, otherwise pure aimbot; the three sources are the `-e` list,
+each also a hot switch):
 
 ```
--o output dir (auto-creates fire/ det/ auto/)  -e enabled sources fire,det,auto (default all)  -F fire interval ms  -A timed interval s  -C cooldown ms  -q JPEG quality
+-o output dir (auto-creates fire/ det/ auto/)  -e enabled sources fire,det,auto (default all)
+-F fire interval ms (default 300)  -A timed interval s (default 10)  -C cooldown ms (default 500)
+-q JPEG quality (default 95)
 ```
 
-**Calibration**: aim at a static background with texture and take both hands off the controls, then hold both side keys for 5 s (pad/p5g: L3+R3 for 5 s, or the webui's 「开始标定」 button = hot param `padcalib=1`). Start = draw a cross (also the preparation window: the operator needs a moment to let go); the round then drives the excitation, measures, and answers **nod = success / shake = failure**. With `-S` the **delay alone** is written back into the script under the current output mode's VAR — `HID_L_EST` (hid) / `PAD_L_EST` (pad) / `P5G_L_EST` (p5g), three independent slots (each mode's loop is its own physical quantity, and p5g's includes the dongle's signing round trip); a failed round writes nothing (no fabricated number) and says why in the log. The speed ratios are manual entries the firmware never writes. All three output modes run the same engine (`io/calib_run.cu`) — the gamepad pair shares the excitation plan, the hid path has its own — so all are calibrated the same way; take the hands off during the round because the measurement is of the screen's response to a program-injected motion (a hand on the stick/mouse adds motion that has nothing to do with the commanded edge).
+**Calibration**: aim at a static background with texture and take both hands off the controls, then hold
+both side keys for 5 s (pad/p5g: L3+R3 for 5 s, or the panel's 「开始标定」 button = hot param
+`padcalib=1`). Start = draw a cross (also the preparation window: the operator needs a moment to let go);
+the round then drives the excitation, measures, and answers **nod = success / shake = failure**. With
+`-S` the **delay alone** is written back into the script under the current output mode's VAR —
+`HID_L_EST` (hid) / `PAD_L_EST` (pad) / `P5G_L_EST` (p5g), three independent slots (each mode's loop is
+its own physical quantity, and p5g's includes the dongle's signing round trip); a failed round writes
+nothing (no fabricated number) and says why in the log. The speed ratios are manual entries the firmware
+never writes. All three output modes run the same engine (`io/calib_run.cpp`) — the gamepad pair shares
+the excitation plan, the hid path has its own — so all are calibrated the same way; take the hands off
+during the round because the measurement is of the screen's response to a program-injected motion (a
+hand on the stick/mouse adds motion that has nothing to do with the commanded edge).
+
+**Pad mode** (`-M pad`): the physical Xbox-layout gamepad passes through 1:1 (buttons, sticks, analog
+triggers **with no threshold on the way out**); the aim trigger is RT ≥ `-T` and LT ≥ `-T` (one threshold
+in % of full scale, shared by both — default 6 % = the measured trigger flat 15/255 rounded up, hot param
+`padthr`), feeding the same `-k` fire/ads/both semantics as hid. The control law's desired velocity
+(px/ms) is injected on the right stick **per axis** by the linear conversion `d = v·1000/A_eff` (`d` =
+deflection fraction, `A_eff` = that axis's effective full-deflection screen speed =
+`gain_pad_eff(spd_axis(ads, axis))`, see `core/state.h`), and the stick deflection is `d·32767`. The
+injected deflection is merged with the human stick and radially clamped to the full-scale circle
+(measured: the device's own travel is a circle — single axes reach ±32767, the diagonal pairs sit at
+~0.71 full, and no logged sample exceeded |(x,y)| ≈ 33074 = 32767×1.009; the injection vector uses the
+same geometry so the law's demanded direction is never rewritten by clamping, and the ledger books the
+post-clamp value). The effective speed cap is `min(-x, A_eff/1000)` px/ms per axis (full deflection is
+that axis's physical limit). A stick ledger records Σ(deflection·tick-ms) of what the game receives —
+the pad counterpart of the `g_counts` invariant — and the estimator/law own-motion compensation source
+is routed per mode (`own_motion_ledger`: hid = `g_counts`, pad = the stick ledger) together with its
+ledger→pixel factor (`own_motion_scale`: hid = the per-axis effective sensitivity in px/count, pad =
+`A_eff/(32767·1000)` px per deflection·ms; the axes must be separate or Y is biased systematically,
+since the ledger unit is a per-axis deflection). Both the injection and both consumers take their base
+from `gain_pad_eff`, so the ratio lands in the same effective gain everywhere — see the ratio-scale
+paragraph above for why that placement is the design and not an implementation detail. The merged logical
+state is published every tick into the `g_pad_publish` latest-slot (contract in `io/pad_output.h`) — the
+output backend polls it and must not rewrite the sticks (the ledger already accounts what the game
+receives). Disconnect/sleep self-heals: keys are cleared and the device is reopened on a 1 s retry cycle,
+non-blocking at startup.
+
+**The 8-bit→16-bit input mapping** (`io/pad_input`, the rule the whole gamepad channel rests on): the log
+is 16-bit, while the measured G7 Pro reports 8-bit unsigned sticks (`0..255`, rest `128`). A device that
+already reports a signed centred range passes through unchanged (its own ±32767 domain *is* the logical
+domain, no table); an unsigned range is expanded by **uniform steps with the overflow absorbed by the
+endpoint** — midpoint code `c = mn + (mx−mn+1)/2` (8-bit: `0x80 = 128`) → `0`, step
+`S = floor(32767/(mx−c))` (8-bit: `floor(32767/127) = 258`), `out[c+k] = min(+S·k, +32767)` for
+`k = 1..mx−c` and `out[c−k] = max(−S·k, −32767)` for `k = 1..c−mn`. The 8-bit family is served at runtime
+by a **compile-time 256-entry table** built from that rule (`PAD_AXIS8_TABLE`), constructed so that all
+255 physical levels are spread evenly over ±32767: 254 of the 255 adjacent steps are 258 and the one
+short step (1) sits at the very bottom, where the deepest level `128×258 = 33024` would exceed the int16
+range and is clamped to `−32767`. The step 258 rather than 257 is the whole point of the shape:
+`floor(32767/127) = 258` is the largest integer step that keeps all 127 positive levels inside ±32767,
+while a step of 257 would leave the highest level `32767 − 257·127 = 128` counts ≈ 0.4 % of full scale
+short of full deflection, and games commonly read *full* deflection to decide sprint/max-turn, so a level
+short costs a whole state; 258 misses by 1 count instead. The price is that the overflow must land
+somewhere, and it lands in the deepest level because a game saturates on the deep side anyway. Properties
+the unit test pins with an independently written golden table: every one of the 256 codes maps to a
+distinct value, the midpoint is exactly 0 (`out[128] = 0`), the top is `out[255] = +32766`, the bottom is
+`out[0] = −32767`, the map is monotone, and the step histogram is exactly `{258: 254, 1: 1}`. The naive
+geometric midpoint `(mn+mx)/2 = 127.5` would instead report rest as +129 counts ≈ 0.4 % of full scale — a
+standing bias on the human channel. No dead zone is added (the game owns its) and the device-declared
+flat/fuzz is not applied. Measured and *not* compensated: the G7 Pro's own Y/RZ rest values are 124/125
+and 126/128, i.e. the device sits 3–4 counts (≈3 % of full scale) off the nominal neutral — that is a
+property of the device, this library does not correct it (the game's dead zone absorbs it), and if it
+ever should be corrected one `absinfo` centre subtraction would do it (no per-device median capture).
+Keeping the channel 16-bit is also what makes a small aim command meaningful: a 0.5 %-of-full-scale
+command is 164 counts there (one count = 0.003 % of full scale) against 1.275 counts in an 8-bit domain
+(one count = 0.39 %), i.e. the latter quantises the command by ≈22 %.
+
+**Pad output** (`io/pad_xinput`): the pad mode's USB side is the emulated wired Xbox 360 pad — the host's
+own XInput stack sees a device whose buttons/sticks/triggers are the merged logical state. Bytes and their
+provenance are the device definition in `io/pad_xinput.cpp`; the wire's Y is up-positive while
+`PadLogical` is up-negative, so the two Y axes are negated at the encoder (the unit test pins both the
+assembly and the convention). The **terminal refresh rate** is `enumeration speed × endpoint bInterval`
+(USB 2.0 §9.6.6), and the shipped pair is **high speed + `bInterval=4`** = 1 ms = 1000 Hz, with the device
+qualifier a high-speed device must answer (USB 2.0 §9.6.2). The serial number is derived per machine
+(FNV-1a-64 of `/etc/machine-id` → 12 uppercase hex digits, falling back to the dbus machine id then the
+hostname) — the host derives its instance id from it, so a public constant would collide across units and
+expose a device fingerprint; the derivation excludes the descriptor bytes because a definition change does
+not need a new instance (the host re-reads descriptors on every arrival).
+
+**P5 output** (`io/pad_p5g`): the p5g mode's USB side, for the PS5. The board enumerates as the P5 General
+dongle itself (0x2B81/0x0101 — hardware-verified byte-identical to the real dongle in device identity,
+configuration, endpoints, report descriptor and the 0x03 feature reply) while the **real dongle** rides a
+host port as the signing co-processor: every merged 64-byte input report is written to the dongle's
+interrupt OUT endpoint and only the dongle's interrupt IN return (hash and auth_seq_number filled by it)
+goes to the PS5, so each report on the wire is authentically signed; the PS5's challenge/response
+handshake travels the feature-report control transfers (0xF0 → dongle, 0xF1/0xF2 ← dongle) through the
+reference state machine's dispatch rules, and starts only on the first physical-pad input (PS press). Idle
+is silent on the wire (change-driven + 4 repeats, the reference's rule). Bring-up probe:
+`sudo python3 scripts/test/p5g_dongle_probe.py` dumps the dongle's own descriptors, exercises the three
+feature transfers and times the OUT→IN round trip.
+
+**Report rate (a conclusion, not an open item).** The output rate is bounded by the real dongle's signing
+round trip, not by anything in this repository's control chain, and that bound is acceptable by
+construction:
+
+- **The bound is a property of the dongle.** The dongle answers 1:1 and never pushes spontaneously, so a
+  continuously-updated stream is serialized by the round trip; the probe's 8-submission timing gives the
+  mean latency and hence the implied continuous-input ceiling, and that one measurement is the standing
+  bound (`[PAD-USB]` is not an alternative instrument here: a change-driven flow reopens a >100 ms gap on
+  its own cadence, so the 60 s window it needs may never complete).
+- **It does not bound the control law.** The loop is closed through the camera: the crosshair position
+  that the law acts on is sensed at the frame rate, so the pad update rate only has to sit well above the
+  frame rate — nothing the law computes is sampled from the pad's report cadence. The signing round trip
+  is a pure transport delay inside the loop, and a constant delay is exactly the quantity calibration
+  measures (p5g's `P5G_L_EST`, one round, which in that mode includes the signature hop), so it is
+  compensated rather than fought. Chasing a higher wire rate would therefore buy no control performance:
+  it would shorten a delay the loop already identifies and cancel.
+- **Consequence for the pad/p5g update path.** The per-tick submission into the session's latest-report
+  slot is overwritten rather than queued (the same latest-slot semantics as every other device here), so
+  a producer faster than the signing pipeline coalesces instead of accumulating a backlog; the pending
+  watchdog (500 ms, the reference firmware's own dongle budget) bounds one stalled round trip and the next
+  submitted state supersedes it.
+
+**Bit width (three-way reconciliation)**: the cloned report descriptor declares **six 8-bit absolute
+axes** (Usage X/Y/Z/Rz/Rx/Ry, logical 0–255, `Report Size 8 × Report Count 6` at descriptor offsets 25/27
+→ bytes 1–6), the reference firmware keeps a **16-bit internal state** and right-shifts it by 8 into that
+field (`P5GeneralDriver.cpp:156`), and `docs/p5general/` §4.1 transcribes both — so the wire is 8-bit and
+the local 16-bit domain must be folded back into it exactly once. The reference's own fold is exact
+**because its inbound map is `v×257`** (`map(v, 0..255, 0..65535)`, whose `>>8` inverts it for every
+code) — but this library's inbound map is the step-258 table (`io/pad_input`), for which `>>8` and
+`(v+32768)>>8` are **not** the identity: 127 of the 256 codes (all of 1..127, the whole negative half)
+come back one step short, i.e. the human channel would be silently scaled down. The encoder therefore
+uses the exact inverse of that table, `wire = clamp(floor(v/258) + 128, 0, 255)`, which reads as
+"arithmetic shift by one wire step (258 logical counts)" and is the identity on all 256 codes (unit test,
+code by code, with the rejected form's 127 failures counted beside it). Because every code's logical value
+is a multiple of 258, `floor((human + inject)/258) = human/258 + floor(inject/258)`: the wire byte is
+literally **the human's original code plus the injection's own 16-bit amount in whole wire steps** — the
+human channel passes through unenlarged, only the aimbot's contribution is computed in 16 bits and folded
+in, which is the landing rule the wire format requires. Rounding is floor (toward −∞, the direction an
+arithmetic shift takes): an injection of +257 logical counts is still 0 wire counts while −257 already
+reads −1, a one-sided half-step at the boundary that is reported rather than rounded away (it is 1/255 of
+the axis's range). Two axes are left with no negation — the wire's stick Y is up-negative, the same
+convention as `PadLogical` (unlike XInput). The class-request segment of ep0 routes to this device's hook
+(see `usbraw`): SET_REPORT 0xF0's data stage is read out and forwarded, GET_REPORT 0x03 answers the 48-byte
+static definition, GET_REPORT 0xF1/0xF2 answer the auth buffer, unknown feature IDs STALL.
+
+Note: structural parameters (PM/ζ/FF_GAIN_VAL/FF_I_GATE/over-compensation and the â-channel constants) are
+header constants in `src/core/control.h` — see "Tuning".
 
 ## Architecture
+
+### Capture and inference (platform side)
+
+The chain is `io/hdmi_in` → `io/rga_pp` → `io/npu_axcl` → `core/detect`, orchestrated by `io/capture`.
+Four properties of it are design requirements rather than implementation choices:
+
+- **The format is the signal's, not ours.** The receiver's driver accepts only the four formats it
+  currently carries and refuses `S_FMT` for anything else, so the layer reads `G_FMT` and adapts; the
+  stride and `sizeimage` are likewise taken from the driver (its rule is `bpl = ALIGN(width × bpp/8, 64)`,
+  `sizeimage = bpl × height`, which reproduces the measured 2560×1440 BGR3 frame exactly at 11059200
+  bytes and matches the 640×480 and 1920×1080 modes too), and the same one rule makes the RGA-required
+  destination size equal the driver's `sizeimage` for all four formats.
+- **The payload is not complete when `DQBUF` returns** (the `low_latency` switch moves completion from
+  `dma_idle` to `line_flag`), so the dma-fence on the buffer is the completion credential and the frame is
+  gated on it; without that gate anything that measures displacement within a frame (calibration's phase
+  correlation included) would read a half-written picture as real motion. The `low_latency` switch itself
+  is written by the layer before `STREAMON` and read back — the driver reads it once, at stream start, so
+  the only place that can guarantee the order is the code calling `STREAMON`.
+- **Newest-frame delivery.** A consumer slower than the signal would otherwise fall behind monotonically
+  and act on a picture that is minutes old (measured: 16.2 ms frame age with newest-frame delivery against
+  91.2 ms in queue order, under a deliberately slow consumer). The queue exists only so the driver never
+  runs out of buffers — its own drop path discards the frame and does not resend.
+- **A lost lock is a stream that stopped, and only a rebuild restores it.** The receiver loses TMDS lock
+  when the source changes mode, the driver stops the stream by itself, and re-locking does **not** reattach
+  it; the symptom is only a poll timeout. The layer separates "signal gone" (detected within one poll
+  slice, up to 200 ms, by the receiver's lock query) from "stream stalled" (the whole poll budget with the
+  lock still held, or a fence-timeout streak) and rebuilds in both cases — `STREAMOFF` (tolerated) → unmap
+  → close the exported dmabufs → `REQBUFS(0)` → close → reopen → bounded wait for the lock → read `G_FMT`
+  → rebuild and queue → `STREAMON`. The order of the last two matters: buffer sizes come from the
+  **post-lock** format, and a mode change alters both resolution and frame rate. A failed rebuild leaves
+  the device closed and retryable, so "source not powered yet" and "device broken" behave identically —
+  wait, and never take the process down.
+
+The coordinate domain is one: the canonical window is the centre 1:1 crop with side
+`W = max(CAP_SIZE, model side)`. A model input smaller than the window is a second centre crop of the
+window, whose only conversion back into the window domain is the translation `(W − model_side)/2`. The law,
+the FOV gate and the calibration all live in that window — and **the crop does not scale**, which is what
+keeps "screen pixel" one unit through the whole chain (`spd`, the FOV radius and the calibrated delay all
+mean the same thing at every stage).
+
+The **model contract** is read from the runtime, not assumed: input U8 NHWC RGB `[1,S,S,3]` (the converted
+models carry their own dequantise/normalise/transpose, so the host feeds raw RGB bytes), and only outputs
+whose layout parses are staged for D2H. A self-converted model whose output tensor carries coordinates and
+confidences under one quantisation gives the confidence a resolution equal to the tensor's codeword length
+— `model_probe` measures and prints both that codeword and the score channel's range for every kept output,
+and the conversion-side fix is to split the head into one tensor per range. Detection numerics belong in
+`core/detect`, which takes bare `float` tensors and knows no backend.
 
 ### State estimation
 
@@ -235,7 +524,7 @@ Note: structural parameters (PM/ζ/FF_GAIN_VAL/FF_I_GATE/over-compensation and t
 | Effective sensitivity | **not calibrated**: the pull-speed ratios (four manual entries in the current output mode's slot, one per axis per fire state) divide that mode's baseline — `s_hid_now` = base·100/ratio per axis (hid), `gain_pad_eff` the same for the pad's full-deflection screen speed | — | user dials |
 | Delay L | the round's three readings (sub-frame-exact tail sum as the primary, two frame-quantized edges), the only calibrated quantity | one calibration round per output mode | constant |
 
-### Control law (ff_pi_acc, `src/core/control.cu`)
+### Control law (ff_pi_acc, `src/core/control.cpp`)
 
 ```
 Predictor (Smith, dt-normalized): α=min(.9, PRED_ALPHA0·dt/DT0), β=min(.6, PRED_BETA0·dt/DT0)
@@ -255,58 +544,260 @@ Convergence bandwidth: wn = (90°−PM)π/180 / L̂   (PM=50°, no hand tuning, 
 Quantization: rem += v·h/s_eff (per axis); counts = clamp(trunc(rem), ±120); rem −= counts
 ```
 
-Without sustained real acceleration the three gates keep â ≡ 0 and the command stream is identical to plain ff_pi (bit-exact in arena).
+Without sustained real acceleration the three gates keep â ≡ 0 and the command stream is identical to plain
+ff_pi (bit-exact in arena).
 
-The **P term** `Kp·ê` is the fast channel: flicks and instant corrections. The **I term** `Ki·∫err` is the slow channel: it removes the steady-state trail behind constant-velocity targets; the integrator is a low-pass, so zero-mean periodic disturbances like recoil cannot accumulate → rejected as a side effect. **No D term**: D amplifies high frequencies and would feed recoil noise back into the commands.
+The **P term** `Kp·ê` is the fast channel: flicks and instant corrections. The **I term** `Ki·∫err` is the
+slow channel: it removes the steady-state trail behind constant-velocity targets; the integrator is a
+low-pass, so zero-mean periodic disturbances like recoil cannot accumulate → rejected as a side effect.
+**No D term**: D amplifies high frequencies and would feed recoil noise back into the commands.
 
-**Direction-contradiction CUSUM → velocity reset (归零重拉)**: every large overshoot on moving targets traces to one root — the target model breaks (stop/ADAD reversal) and v̂ becomes a ghost that simultaneously pushes FF the wrong way AND masks the error in the Smith prediction (the loop can't see its own trail → mushy pull-back). When the CUSUM (Page sequential change test, σ-normalized, σ online-estimated — **no absolute-px constants**; K/C/H are σ multiples so the gate auto-widens with device noise) detects innovation sustained against v̂, that axis's velocity is reset to zero while the position estimate is kept: the loop re-runs the step response (the best-tuned behavior: settle 277ms / 3.1px) with no ghost in the projection (P sees the full true error → sharp pull-back) and FF rebuilding from zero in the correct direction (no wrong-way push, no re-engagement kick). Only contradiction-direction innovation accumulates, so the chase after a reset cannot re-trigger (innovation then agrees with the rebuilding v̂); the per-frame increment cap (3σ) rejects single-frame kicks (recoil).
+**Direction-contradiction CUSUM → velocity reset (归零重拉)**: every large overshoot on moving targets
+traces to one root — the target model breaks (stop/ADAD reversal) and v̂ becomes a ghost that simultaneously
+pushes FF the wrong way AND masks the error in the Smith prediction (the loop can't see its own trail →
+mushy pull-back). When the CUSUM (Page sequential change test, σ-normalized, σ online-estimated — **no
+absolute-px constants**; K/C/H are σ multiples so the gate auto-widens with device noise) detects
+innovation sustained against v̂, that axis's velocity is reset to zero while the position estimate is kept:
+the loop re-runs the step response (the best-tuned behavior: settle 277ms / 3.1px) with no ghost in the
+projection (P sees the full true error → sharp pull-back) and FF rebuilding from zero in the correct
+direction (no wrong-way push, no re-engagement kick). Only contradiction-direction innovation accumulates,
+so the chase after a reset cannot re-trigger (innovation then agrees with the rebuilding v̂); the per-frame
+increment cap (3σ) rejects single-frame kicks (recoil).
 
-**No hand tuning inside the law & anti-windup**: the bandwidth `wn` depends only on the calibrated `L` (tracking speed is recovered by the feedforward; PM=50 is the fastest design point the mismatch band accepts — L20–70 and s0.7–1.3 outright, with the L80 corner settling on the 3 px edge and no divergence; test-suite-chosen, not feel-chosen). Anti-windup = conditional integration (freeze the integrator when the output is saturated and the error still pushes toward saturation) + integrator clamp `±FF_I_FRAC·vmax/Ki`, preventing windup overshoot on long flicks.
+**No hand tuning inside the law & anti-windup**: the bandwidth `wn` depends only on the calibrated `L`
+(tracking speed is recovered by the feedforward; PM=50 is the fastest design point the mismatch band
+accepts — L20–70 and s0.7–1.3 outright, with the L80 corner settling on the 3 px edge and no divergence;
+test-suite-chosen, not feel-chosen). Anti-windup = conditional integration (freeze the integrator when the
+output is saturated and the error still pushes toward saturation) + integrator clamp `±FF_I_FRAC·vmax/Ki`,
+preventing windup overshoot on long flicks.
 
 ### Calibration
 
-One measurement method, one state machine, one fit (`io/calib_run.cu`), shared by all three output modes; a mode supplies only its excitation plan (the hid one, or the gamepad one that `pad` and `p5g` share), its injection units and the delay VAR it writes. **The deliverable is the loop delay `L` alone** — speed is never calibrated (the per-game feel is the four manual `spd` ratios).
+One measurement method, one state machine, one fit (`io/calib_run.cpp`), shared by all three output modes;
+a mode supplies only its excitation plan (the hid one, or the gamepad one that `pad` and `p5g` share), its
+injection units and the delay VAR it writes. **The deliverable is the loop delay `L` alone** — speed is
+never calibrated (the per-game feel is the four manual `spd` ratios).
 
-**Observation model.** The command edge is at `t₀`; the picture follows it delayed by `L`: the frame at `tₖ` shows the world's displacement over `[tₖ−dt−L, tₖ−L]`. Every reading below is "the distance between the command edge and the picture edge" on that same observation stream, and the loop delay cancels inside each segment's slope — so a segment's measured travel overshooting its target by `v·L` is harmless, and the method does not depend on the sampling rate.
+**Observation model.** The command edge is at `t₀`; the picture follows it delayed by `L`: the frame at `tₖ`
+shows the world's displacement over `[tₖ−dt−L, tₖ−L]`. Every reading below is "the distance between the
+command edge and the picture edge" on that same observation stream, and the loop delay cancels inside each
+segment's slope — so a segment's measured travel overshooting its target by `v·L` is harmless, and the
+method does not depend on the sampling rate.
 
-**Excitation shape (designed for the delay, not for a speed curve).** Per axis: quiet → hold `+d` until the travel is there → stop → a 300 ms quiet pause → repeat with the opposite sign, so the picture returns to where it started. The amplitude is derived from a **target screen speed `v*` under three constraints**:
+**Excitation shape (designed for the delay, not for a speed curve).** Per axis: quiet → hold `+d` until the
+travel is there → stop → a 300 ms quiet pause → repeat with the opposite sign, so the picture returns to
+where it started. The amplitude is derived from a **target screen speed `v*` under three constraints**:
 
-1. **segment span ≥ 6 frames at the measured sampling rate**: the segment lasts `T = A/v*`, so `v* ≤ A/(6·dt)`. Sized at the slowest assumed rate (60 fps) so both 60 and 120 fps satisfy it, this gives `v*[H] = 150px/100ms = 1.5 px/ms` and `v*[Y] = 1.0 px/ms` (`A` = the travel target). Measured sampling rate and the realised span are logged per round.
-2. **per-frame displacement inside the correlation range**: `v*·dt ≤ 106 px` = 12 700 px/s at 120 fps against a design 12.5 px/frame — an 8.5× margin, there only so a game much faster than assumed turns into a discarded segment rather than a wrong number.
-3. **tail `v·L` far above the noise**: the tail reading's time resolution is `σ√n/v`, which must stay under the edge readings' own quantization `dt/2` → `v ≥ 2σ√n/dt` ≈ 0.11 px/ms at the measured σ (0.03–0.1 px/frame) — the design value is 13× that.
+1. **segment span ≥ 6 frames at the measured sampling rate**: the segment lasts `T = A/v*`, so
+   `v* ≤ A/(6·dt)`. Sized at the slowest assumed rate (60 fps) so both 60 and 120 fps satisfy it, this gives
+   `v*[H] = 150px/100ms = 1.5 px/ms` and `v*[Y] = 100px/100ms = 1.0 px/ms` (`A` = the travel target).
+   Measured sampling rate and the realised span are logged per round.
+2. **per-frame displacement inside the correlation range**: `v*·dt ≤ 106 px` = 12 700 px/s at 120 fps
+   against a design 12.5 px/frame — an 8.5× margin, there only so a game much faster than assumed turns
+   into a discarded segment rather than a wrong number.
+3. **tail `v·L` far above the noise**: the tail reading's time resolution is `σ√n/v`, which must stay under
+   the edge readings' own quantization `dt/2` → `v ≥ 2σ√n/dt` ≈ 0.11 px/ms at the measured σ (0.03–0.1
+   px/frame) — the design value is 13× that.
 
-Injecting it: hid commands `r = v*/s_hid_now(ads, axis)` counts/ms (the spd scale's effective sensitivity — the single conversion base of this mode) quantized per tick with a running remainder so the mean rate is exact; pad commands a deflection `d = clamp(v*·1000/gain_pad_eff(spd_axis(ads,axis)), 0.30, 1)` — 1 = full deflection (the physical stop), 0.30 = the measured dead-zone floor (10 % deflection barely moves the picture). **That clamp is also the measurable ratio band**: `d = spd/200` at the default gain, so only `spd ∈ [60, 200]` (= `[gain/50, gain/15]`) lets the design `v*` land exactly; below 60 the 0.30 floor holds, the realised screen speed becomes `90000/spd` px/s = `750/spd` px/frame, and every segment is discarded — by the 106 px range gate for `spd ≲ 7`, by the "measurement window ≥ one frame" gate for `spd ≲ 10` (120 fps) / `≲ 20` (60 fps), since the 25 %→75 % secant shrinks to `0.83·spd` ms against a frame of 8.3/16.7 ms. The failure is honest (the segment is dropped, no number is invented) and it costs nothing operationally, because calibration and `spd` are independent quantities: **dial `spd` into 60–200, calibrate `L`, dial it back** — `L` is a property of the loop, not of the ratio (`core/state.h`'s 5..2000 is `spd`'s own usable band, not this excitation's domain). Axis coverage: hid excites both axes (per-axis mouse smoothing differs; the two axes' results are reported side by side), pad only the horizontal one (the vertical channel is polluted by pitch clamping and rotational aim assist — measured: during a round the other axis is continuously pulled).
+Injecting it: hid commands `r = v*/s_hid_now(ads, axis)` counts/ms (the spd scale's effective sensitivity —
+the single conversion base of this mode) quantized per tick with a running remainder so the mean rate is
+exact; pad commands a deflection `d = clamp(v*·1000/gain_pad_eff(spd_axis(ads,axis)), 0.30, 1)` — 1 = full
+deflection (the physical stop), 0.30 = the measured dead-zone floor (10 % deflection barely moves the
+picture). **That clamp is also the measurable ratio band**: `d = spd/200` at the default gain, so only
+`spd ∈ [60, 200]` (= `[gain/50, gain/15]`) lets the design `v*` land exactly; below 60 the 0.30 floor
+holds, the realised screen speed becomes `90000/spd` px/s = `750/spd` px/frame, and every segment is
+discarded — by the 106 px range gate for `spd ≲ 7`, by the "measurement window ≥ one frame" gate for
+`spd ≲ 10` (120 fps) / `≲ 20` (60 fps), since the 25 %→75 % secant shrinks to `0.83·spd` ms against a frame
+of 8.3/16.7 ms. The failure is honest (the segment is dropped, no number is invented) and it costs nothing
+operationally, because calibration and `spd` are independent quantities: **dial `spd` into 60–200,
+calibrate `L`, dial it back** — `L` is a property of the loop, not of the ratio (`core/state.h`'s 5..2000
+is `spd`'s own usable band, not this excitation's domain). Axis coverage: hid excites both axes (per-axis
+mouse smoothing differs; the two axes' results are reported side by side), pad only the horizontal one (the
+vertical channel is polluted by pitch clamping and rotational aim assist — measured: during a round the
+other axis is continuously pulled).
 
-**Readings (three, independent).** Each segment yields a start edge and a stop edge; each pause yields the tail:
-- **Tail sum (primary, sub-frame exact):** after the stop command the picture still travels `v·L`, so the pause's displacement sum is `v·(t₁−t_first+dt_first+L)` → `L = Σ/v + (t_first−t₁) − dt_first`. The sum telescopes between the first and last *world* instants, so dropped frames change nothing. `v` is the segment's **mid-secant** (the 25 %→75 % crossings of the target) — noise at the onset cannot leak into it, which matters because the reading is first-order sensitive to `v`.
-- **Start edge:** the first sample whose accumulated travel leaves the noise envelope (`K·σ√n`, not a fixed `3σ`: the accumulation is a random walk under noise, so a fixed gate is crossed within a few frames and the edge lands 10–50 ms early). `L = t_first_moving − t₀ − dt/2`.
+**Readings (three, independent).** Each segment yields a start edge and a stop edge; each pause yields the
+tail:
+- **Tail sum (primary, sub-frame exact):** after the stop command the picture still travels `v·L`, so the
+  pause's displacement sum is `v·(t₁−t_first+dt_first+L)` → `L = Σ/v + (t_first−t₁) − dt_first`. The sum
+  telescopes between the first and last *world* instants, so dropped frames change nothing. `v` is the
+  segment's **mid-secant** (the 25 %→75 % crossings of the target) — noise at the onset cannot leak into it,
+  which matters because the reading is first-order sensitive to `v`.
+- **Start edge:** the first sample whose accumulated travel leaves the noise envelope (`K·σ√n`, not a fixed
+  `3σ`: the accumulation is a random walk under noise, so a fixed gate is crossed within a few frames and
+  the edge lands 10–50 ms early). `L = t_first_moving − t₀ − dt/2`.
 - **Stop edge:** the last sample still above `max(3σ, 0.5 px)`. `L = t_last_moving − t₁ − dt/2`.
 
-Both edges use the same mid-bracket rule (±dt/2, symmetric) and are quantized to the frame grid. The **stop edge is reported, not gated**: once the game's smoothing rounds the command edge, that reading walks with `τ·ln(v·dt/threshold)` (measured: 47 ms late at τ = 15 ms, while the start edge is 4 ms late) — it is the field's window into the response's shape. The consistency gate therefore pairs the tail with the **start edge** (a pure time difference, gain- and threshold-independent).
+Both edges use the same mid-bracket rule (±dt/2, symmetric) and are quantized to the frame grid. The **stop
+edge is reported, not gated**: once the game's smoothing rounds the command edge, that reading walks with
+`τ·ln(v·dt/threshold)` (measured: 47 ms late at τ = 15 ms, while the start edge is 4 ms late) — it is the
+field's window into the response's shape. The consistency gate therefore pairs the tail with the **start
+edge** (a pure time difference, gain- and threshold-independent).
 
-**Pause length and the `L` bound are one decision.** The pause must hold (a) the tail, (b) a genuinely static reference window for σ, (c) the next segment's onset margin. So the static window starts at `L_MAX + 2·dt_60 = 160 ms` and lasts 140 ms, and the pause is `160+140 = 300 ms`. The same 160 ms is the self-check: a tail reading above it means the pause no longer contains the tail (a truncated tail saturates exactly at the pause length) → the round fails with that reason instead of reporting a smaller number. `L_MAX = 120 ms` = 7 frames at 60 fps (4 game-side input→display + 3 capture/inference/tick) — a measurement outside `[0, 120]` fails rather than being clamped.
+**Pause length and the `L` bound are one decision.** The pause must hold (a) the tail, (b) a genuinely
+static reference window for σ, (c) the next segment's onset margin. So the static window starts at
+`L_MAX + 2·dt_60 = 160 ms` and lasts 140 ms, and the pause is `160+140 = 300 ms`. The same 160 ms is the
+self-check: a tail reading above it means the pause no longer contains the tail (a truncated tail saturates
+exactly at the pause length) → the round fails with that reason instead of reporting a smaller number.
+`L_MAX = 120 ms` = 7 frames at 60 fps (4 game-side input→display + 3 capture/inference/tick) — a
+measurement outside `[0, 120]` fails rather than being clamped.
 
-**Gates** (each with its source; the tail-vs-edge difference and every family's median/MAD are printed whether or not a flag is set): travel reached (to-target stop; a timeout is "unmeasurable" and reports the speed upper bound 150px/2000ms = 75 px/s), per-frame displacement inside the correlation range (half the block's screen-domain width = 106 px), block spread as the per-segment **median** (the frame maximum is logged only — one ambiguous frame must not discard a segment), response above the texture floor (median correlation peak ≥ 0.05 = 5× the block inclusion gate), a measurement window ≥ one frame, the tail not truncated (≤ 160 ms), per-family **MAD ≤ one measured sampling interval** (the readings' own quantization; more means they are not repeats of one physical measurement), tail-vs-start-edge agreement within 3 combined standard errors + one frame + 30 % of `L` (the last two are the edge's quantization and the law's proven mismatch band), a family needs **≥ 5 readings** to be aggregated at all, and the σ pool needs **≥ 20 static samples per axis** (median + MAD's minimum sample size; a family is that mode's readings pooled — 8 for hid's two axes, 6 for pad's one — and the plan gives 4 pauses per axis to feed the σ pool), `L` inside its physical band, and **at least one segment with measured motion** (otherwise the whole round fails: "screen not responding"). Aggregation is median + MAD per reading family; the written value is the tail family's median (the stop-edge family is the fallback when no tail survives, and is announced). For hid the two axes' tail medians are printed side by side as a diagnostic and the written value is the **whole-round** median — there is no per-axis agreement test: each axis carries only 4 tail readings (fewer than median + MAD's minimum sample size), their scatter is already what the family's MAD gate covers (two axes genuinely apart blow that gate first and fail the round with both medians and the dispersion in the log), and both branches of such a test would write the same number, which is why the number is not gated on it.
+**Gates** (each with its source; the tail-vs-edge difference and every family's median/MAD are printed
+whether or not a flag is set): travel reached (to-target stop; a timeout is "unmeasurable" and reports the
+speed upper bound 150px/2000ms = 75 px/s), per-frame displacement inside the correlation range (half the
+block's screen-domain width = 106 px), block spread as the per-segment **median** (the frame maximum is
+logged only — one ambiguous frame must not discard a segment), response above the texture floor (median
+correlation peak ≥ 0.05 = 5× the block inclusion gate), a measurement window ≥ one frame, the tail not
+truncated (≤ 160 ms), per-family **MAD ≤ one measured sampling interval** (the readings' own quantization;
+more means they are not repeats of one physical measurement), tail-vs-start-edge agreement within 3 combined
+standard errors + one frame + 30 % of `L` (the last two are the edge's quantization and the law's proven
+mismatch band), a family needs **≥ 5 readings** to be aggregated at all, and the σ pool needs **≥ 20 static
+samples per axis** (median + MAD's minimum sample size; a family is that mode's readings pooled — 8 for
+hid's two axes, 6 for pad's one — and the plan gives 4 pauses per axis to feed the σ pool), `L` inside its
+physical band, and **at least one segment with measured motion** (otherwise the whole round fails: "screen
+not responding"). Aggregation is median + MAD per reading family; the written value is the tail family's
+median (the stop-edge family is the fallback when no tail survives, and is announced). For hid the two
+axes' tail medians are printed side by side as a diagnostic and the written value is the **whole-round**
+median — there is no per-axis agreement test: each axis carries only 4 tail readings (fewer than median +
+MAD's minimum sample size), their scatter is already what the family's MAD gate covers (two axes genuinely
+apart blow that gate first and fail the round with both medians and the dispersion in the log), and both
+branches of such a test would write the same number, which is why the number is not gated on it.
 
-**Sampling side.** 640×640 centre crop → grayscale → INTER_AREA to the 320 half-resolution domain → 3×3 blocks (≈106 correlation px) → per block, a **1-D projection phase correlation along the excitation axis**. Both that and the 2-D block correlation are implemented and measured on the Orin (same synthetic injections, real capture-card texture): 0.90 vs 5.19 ms/frame (11 % vs 62 % of the 120 fps budget; live 2.34 vs 10.56 ms with the capture pipeline in the same thread), sub-pixel error ±0.01 vs −0.04…−0.15 screen px, peak at a 60 px shift 0.54 vs 0.31, identical HUD rejection, cross-axis leakage −0.05 vs −0.04 px — the projection wins on all three counts and the 320 domain (rather than 1:1) is kept because the domain only buys sampling rate. Static content is rejected per frame *before* any median is taken: a game HUD is still on screen, so its blocks report "shift ≈ 0 with a high correlation peak" and a HUD majority collapses the plain block median to 0 at real displacements (measured: 6/9 blocks static, true displacement 90 px → plain median 0.00, while the cluster median reads 89.9) — blocks below half the largest block shift are therefore dropped first. Reliable per-frame shift = half the block width in the screen domain = 106 px (the circular correlation's peak is unique only below it; measured exact at 52 domain px). A reported pixel is a *screen* pixel (×2 scale). This costs ≈1.5 ms/frame of the capture thread on the real device (measured, 120 fps round: 1271 samples in 1272 frames, 8.42 ms mean ≈ 119 fps) and needs no AI detection at all; during a round the inference path is skipped entirely.
+**Sampling side.** 640×640 centre crop → grayscale → INTER_AREA to the 320 half-resolution domain → 3×3
+blocks (≈106 correlation px) → per block, a **1-D projection phase correlation along the excitation axis**.
+Both that and the 2-D block correlation are implemented and measured (same synthetic injections, real
+signal texture): 0.90 vs 5.19 ms/frame (11 % vs 62 % of the 120 fps budget), sub-pixel error ±0.01 vs
+−0.04…−0.15 screen px, peak at a 60 px shift 0.54 vs 0.31, identical HUD rejection, cross-axis leakage
+−0.05 vs −0.04 px — the projection wins on all three counts, and the 320 domain (rather than 1:1) is kept
+because the domain only buys sampling rate. Static content is rejected per frame *before* any median is
+taken: a game HUD is still on screen, so its blocks report "shift ≈ 0 with a high correlation peak" and a
+HUD majority collapses the plain block median to 0 at real displacements (measured: 6/9 blocks static, true
+displacement 90 px → plain median 0.00, while the cluster median reads 89.9) — blocks below half the
+largest block shift are therefore dropped first. Reliable per-frame shift = half the block width in the
+screen domain = 106 px (the circular correlation's peak is unique only below it; measured exact at 52
+domain px). A reported pixel is a *screen* pixel (×2 scale). The cost is a fraction of the capture thread's
+frame budget and needs no AI detection at all; during a round the inference path is skipped entirely (a
+round's measured sampling rate, capture rate, no-sample fraction and per-frame sampling cost are printed by
+that round and asserted by `scripts/test/uinput_calib_test.py`).
 
-**Triggers, feedback, write-back.** hid = both side keys held 5 s; pad/p5g = L3+R3 held 5 s or `padcalib=1` (consumed once — a request arriving mid-round is logged and dropped, never re-entrant). The round owns the injection channel (hid: the report's displacement bytes; pad: `pad_excite`, which centres the human sticks and triggers and keeps the buttons so L3/R3 still reach the game) and stands the law down. Success writes only the current output mode's delay VAR (`HID_L_EST`/`PAD_L_EST`/`P5G_L_EST`) atomically; `-a n` (pure pass-through) makes calibration unreachable and resets a running round (the excitation is program-injected motion, exactly what pass-through forbids). Unmeasurable outcomes are reported as such with their evidence in the log: no motion at all, only noise (σ = 0.000 exactly = a frozen screen — the real-machine observation when the capture card sees a static desktop), a truncated tail, or dispersion beyond one sampling interval.
+**Triggers, feedback, write-back.** hid = both side keys held 5 s; pad/p5g = L3+R3 held 5 s or `padcalib=1`
+(consumed once — a request arriving mid-round is logged and dropped, never re-entrant). The round owns the
+injection channel (hid: the report's displacement bytes; pad: `pad_excite`, which centres the human sticks
+and triggers and keeps the buttons so L3/R3 still reach the game) and stands the law down. Success writes
+only the current output mode's delay VAR (`HID_L_EST`/`PAD_L_EST`/`P5G_L_EST`) atomically; `-a n` (pure
+pass-through) makes calibration unreachable and resets a running round (the excitation is program-injected
+motion, exactly what pass-through forbids). Unmeasurable outcomes are reported as such with their evidence
+in the log: no motion at all, only noise (σ = 0.000 exactly = a frozen screen — the observation when the
+receiver carries a static desktop), a truncated tail, or dispersion beyond one sampling interval. **A
+source loss voids the round**: the correlation domain's "previous frame" and the sample history both
+straddle that gap (frame intervals become seconds), so a rebuild clears both and the round fails honestly as
+"no samples"; a request that arrives during the outage is consumed and answered as a failure — with no
+picture, any write-back could only be a fabricated value.
 
 ## Invariants
 
 1. **Gains are normalized by measured dt**; framerate changes don't change the feel.
-2. **Never assume 1 count = 1 px**; everything is converted through the effective sensitivity (per axis, per fire state).
-3. **`g_counts` records exactly the counts the game actually received** (mouse + aimbot + calibration); filter compensation and in-flight correction depend on it. Calibration does not read it (the measurement comes entirely from screen displacement).
+2. **Never assume 1 count = 1 px**; everything is converted through the effective sensitivity (per axis, per
+   fire state).
+3. **`g_counts` records exactly the counts the game actually received** (mouse + aimbot + calibration);
+   filter compensation and in-flight correction depend on it. Calibration does not read it (the measurement
+   comes entirely from screen displacement).
 4. **Jumps beyond `TRACK_JUMP_GATE` reset the filter**; no patch-style clamps.
-5. Calibration sampling (phase correlation) **does not depend on AI detection**; the two couple only through `l_est`.
-6. The calibration state machine is driven by that mode's 1 kHz tick (hid: the law tick in `core/control.cu`; pad/p5g: the pad tick in `io/pad_output.cu`) and lives in `io/calib_run.cu` with one state instance per mode; the AI thread only responds to the three atomics `g_calib_collect`/`g_calib_request`/`g_calib_done` (`g_padcalib_request` is the webui's one-shot round request).
-7. **Durations are wall-clock milliseconds** (`ms_to_ticks`, `core/state.h`): a tick count is never the source of truth for how long something lasts — the calibration trigger (5 s), the reply timeout (2 s), the segment timeout (2000 ms), the pause (300 ms), the travel targets and the ledger histories (3 s) are stated in milliseconds, and **every calibration reading is a ratio of measured timestamps and measured `dt`** (edge brackets, tail windows, the mid-secant denominator), so a lower sampling rate only coarsens the readings (visible in their MAD) and neither re-times nor re-scales the measurement. The excitation is a screen-speed profile converted to the mode's own injection unit (counts/ms for hid, a deflection fraction for pad) and quantized per tick, so the tick rate is a sampling-resolution choice, not a tuning knob.
-8. **The output mode owns exactly one input channel and one UDC session**: hid reads the real mouse and never opens the gamepad, pad/p5g read the gamepad and never start the mouse session, and all three run the *same* control law with the same estimator and the same delay `L` (each mode family with its own calibrated value and its own write-back VAR). The per-mode difference is where the law's velocity index lands (counts vs stick deflection), the speed cap's second argument (none vs that axis's effective full-deflection speed) and the own-motion ledger's unit — all three are defined once, in `io/pad_output` and `core/state.h`, and are consumed by injection, in-flight compensation and the estimator's compensation from that single definition.
-9. **p5g: the bytes on the PS5's wire are always the dongle's bytes** — the backend never sends an input report that did not come back from the real dongle (the hash field is the per-report auth data and only the dongle can fill it), and no report is produced at all while the dongle is absent. The 8-bit wire field is likewise an exact round trip of the human channel: the encoder is the exact inverse of `io/pad_input`'s 8→16 table, and the injection is folded in as whole wire steps, so passthrough is unenlarged and unclipped by the fold.
+5. Calibration sampling (phase correlation) **does not depend on AI detection**; the two couple only through
+   `l_est`.
+6. The calibration state machine is driven by that mode's 1 kHz tick (hid: the law tick in
+   `core/control.cpp`; pad/p5g: the pad tick in `io/pad_output.cpp`) and lives in `io/calib_run.cpp` with one
+   state instance per mode; the capture thread only responds to the three atomics
+   `g_calib_collect`/`g_calib_request`/`g_calib_done` (`g_padcalib_request` is the panel's one-shot round
+   request).
+7. **Durations are wall-clock milliseconds** (`ms_to_ticks`, `core/state.h`): a tick count is never the
+   source of truth for how long something lasts — the calibration trigger (5 s), the segment timeout
+   (2000 ms), the pause (300 ms), the travel targets and the ledger histories are stated in milliseconds,
+   and **every calibration reading is a ratio of measured timestamps and measured `dt`** (edge brackets,
+   tail windows, the mid-secant denominator), so a lower sampling rate only coarsens the readings (visible
+   in their MAD) and neither re-times nor re-scales the measurement. The excitation is a screen-speed
+   profile converted to the mode's own injection unit (counts/ms for hid, a deflection fraction for pad)
+   and quantized per tick, so the tick rate is a sampling-resolution choice, not a tuning knob.
+8. **The capture rate is the signal's, not a parameter.** There is no frame-rate flag; the receiver's locked
+   timing defines the frame length scale (`src_fps()`), and the only measurable rate is the detection rate
+   on the `[AI FPS]` line.
+9. **The output mode owns exactly one input channel and one UDC session**: hid reads the real mouse and
+   never opens the gamepad, pad/p5g read the gamepad and never start the mouse session, and all three run
+   the *same* control law with the same estimator and the same delay `L` (each mode family with its own
+   calibrated value and its own write-back VAR). The per-mode difference is where the law's velocity index
+   lands (counts vs stick deflection), the speed cap's second argument (none vs that axis's effective
+   full-deflection speed) and the own-motion ledger's unit — all three are defined once, in `io/pad_output`
+   and `core/state.h`, and are consumed by injection, in-flight compensation and the estimator's
+   compensation from that single definition.
+10. **p5g: the bytes on the PS5's wire are always the dongle's bytes** — the backend never sends an input
+    report that did not come back from the real dongle (the hash field is the per-report auth data and only
+    the dongle can fill it), and no report is produced at all while the dongle is absent. The 8-bit wire
+    field is likewise an exact round trip of the human channel: the encoder is the exact inverse of
+    `io/pad_input`'s 8→16 table, and the injection is folded in as whole wire steps, so passthrough is
+    unenlarged and unclipped by the fold.
 
 ## Tuning
 
-**The law has no hand-tuned gains; the speed scale is what the operator supplies.** After calibrating `L`, `wn` scales with `L` automatically (PM=50° is the test suite's choice, ζ and the FF gain are principle-derived), and the per-game speed is the current output mode's four pull-speed ratios — one per axis, plus a second pair while ADS is held, one slot of five hand-editable values per mode. Those ratios are not a tuned constant: they encode the game's own input sensitivity (hid: px/count; pad/p5g: px/s at full deflection), which the firmware cannot observe. Their correct value puts the loop at its design point — which is why the calibration log prints each excitation segment's measured screen speed beside the assumed sensitivity, the exact value following from that by arithmetic. The law's proven mismatch envelope is ±30% (arena `s0.7–1.3`), so a value past the game's true sensitivity is a deliberate gain overrun that spends phase margin; the per-axis and per-ADS split is physical (vertical is commonly slower, ADS commonly lowers sensitivity), not taste. Structural parameters are header constants in `src/core/control.h` (law, filter and trigger constants), `src/core/state.h` (system constants, the tick period and the ratio scale's base constants) and `src/io/calib_run.h` (calibration plan, gate and duration constants, each with its derivation in that file's header) / `src/core/calib.h` (sampling geometry):
+**The law has no hand-tuned gains; the speed scale is what the operator supplies.** After calibrating `L`,
+`wn` scales with `L` automatically (PM=50° is the test suite's choice, ζ and the FF gain are
+principle-derived), and the per-game speed is the current output mode's four pull-speed ratios — one per
+axis, plus a second pair while ADS is held, one slot of five hand-editable values per mode. Those ratios are
+not a tuned constant: they encode the game's own input sensitivity (hid: px/count; pad/p5g: px/s at full
+deflection), which the firmware cannot observe. Their correct value puts the loop at its design point —
+which is why the calibration log prints each excitation segment's measured screen speed beside the assumed
+sensitivity, the exact value following from that by arithmetic. The law's proven mismatch envelope is ±30%
+(arena `s0.7–1.3`), so a value past the game's true sensitivity is a deliberate gain overrun that spends
+phase margin; the per-axis and per-ADS split is physical (vertical is commonly slower, ADS commonly lowers
+sensitivity), not taste.
+
+### The resolution rule (the law's constants are pixels)
+
+The law, the FOV gate and the calibration all live in the **captured frame's pixel domain**, so raising the
+source resolution does not change any code constant — it changes the **physics of a pixel**. A pixel is not
+an angle, and what physically happens on screen scales with
+
+```
+R = (pixels per degree of the new source) / (pixels per degree of the reference source)
+```
+
+which for the same field of view is just the width ratio. Three quantities move, in two directions:
+
+| Quantity | Where it lives | Scaling | Why |
+|---|---|---|---|
+| `MAX_SPEED` (`-x`, px/s) | crosshair speed cap (`g_max_v`) | **× R** | the crosshair must still cover the same angular rate: the screen speed of a given world motion is proportional to the pixels per degree, and `f` (px) is proportional to the width |
+| `FOV_RADIUS` (`-r`, px) | target-selection gate and integrator-start boundary | **× R** | the same angular engagement circle spans R× as many pixels |
+| the four pull-speed ratios (`--spd`/`--ads-spd`) | effective sensitivity = baseline / (ratio/100) | **÷ R** | a larger ratio means "assume a *lower* game sensitivity". More pixels per degree means the game's real sensitivity — px per count, px/s per deflection — is R× *higher*, so the assumed sensitivity must rise, i.e. the ratio must fall |
+
+Everything stated in time is untouched: `L` (ms) is a delay, not a length, so the calibration's result and
+every gate expressed in milliseconds or in frames carry over unchanged. The canonical window `CAP_SIZE` is a
+pixel count too and does not move — but note that at a higher source resolution the same 640-pixel window
+covers a smaller angle, which is exactly why the two operator values above must be rescaled while the code
+stays as it is.
+
+**Worked example — a 1080p → 1440p source, R = 4/3.** The derivation's reference resolution is 1080p
+(`f ≈ 960 px`, hFOV 90°; the whole `MAX_SPEED` argument in the launcher template is expressed at that
+scale), and the deployment signal is 2560×1440 — 4/3 the width. Applying the rule to the shipped working
+point:
+
+| Value | at the 1080p reference | at 1440p (× or ÷ 4/3) |
+|---|---|---|
+| `MAX_SPEED` | 2000 px/s | **≈2667 px/s** |
+| `FOV_RADIUS` | 150 px | **200 px** |
+| any pull-speed ratio | e.g. 100 | **75** |
+| `L` | the calibrated value | unchanged (a time) |
+| `CAP_SIZE` | 640 px | unchanged (a pixel count) |
+
+The direction is the part that is easy to get backwards: the ratios go **down** by R, not up. A ratio left
+at its 1080p value under a 1440p source assumes a sensitivity R× too low, so the same desired screen
+velocity becomes R× too few counts — the crosshair trails — and the operator's instinct to "dial it up for a
+faster pull" would move it further from the design point. **未验证**: the table is arithmetic from the rule,
+not a measurement; the shipped defaults have not been re-derived against a 1440p calibration round on the
+board.
+
+Structural parameters are header constants in `src/core/control.h` (law, filter and trigger constants),
+`src/core/state.h` (system constants, the tick period and the ratio scale's base constants) and
+`src/io/calib_run.h` (calibration plan, gate and duration constants, each with its derivation in that file's
+header) / `src/core/calib.h` (sampling geometry):
 
 | Constant | Default | Meaning | On-device adjustment |
 |---|---|---|---|
@@ -317,26 +808,54 @@ Both edges use the same mid-bracket rule (±dt/2, symmetric) and are quantized t
 | `FF_I_FRAC` | 1.0 | Integrator clamp (×vmax/Ki) | Windup overshoot → lower |
 | `PRED_ALPHA0/BETA0` | 0.50/0.03 | Filter position/velocity gains @120fps | Model jitter → lower ALPHA0; **real device much noisier → lower BETA0 first** (FF noise goes through it; 0.03 = band-edge margin) |
 | `PRED_L_COMP` | 1.10 | Smith over-compensation factor | Calibrated L too low (dangerous) → keep >1; too high → 1.0 |
-| `FOV_RADIUS` | 150 px | Default FOV radius — target selection gate AND integrator-start boundary; runtime value overridable via `-r` and hot-param `fov` | Widen: farther targets enter the gate (multi-target grab risk); >~452 px is wasted (capture window diagonal) |
+| `TRACK_JUMP_GATE` | 100 px | Innovation above this resets the filter | Raise only if a real re-lock is being rejected mid-track |
+| `TARGET_STALE_MS` | 200 ms | Target times out → aiming pauses | Raise on a very slow game (the last target keeps its old position for longer) |
+| `FOV_RADIUS` | 150 px | Default FOV radius — target selection gate AND integrator-start boundary; runtime value overridable via `-r` and hot-param `fov` | Widen: farther targets enter the gate (multi-target grab risk); beyond the window's half-diagonal it is wasted. **Rescale with the source resolution (see the resolution rule)** |
+| `CAP_SIZE` | 640 px | Canonical window side — the domain the law, the FOV gate and calibration live in | Only meaningful together with the model side: `W = max(CAP_SIZE, model side)`, and the crop does not scale |
+| `NMS_IOU_THR` | 0.45 | NMS IoU gate | The YOLO export toolchain's default; class-wise, and aiming keeps the nearest in-FOV target |
+| `S_HID_BASE` / `GAIN_PAD_BASE` / `SPD_*` | 1.0 / 3000 / 100 · [1,10000] | The ratio scale's baselines and clamp (see "Parameters") | The baselines decide how close a ratio's first guess is; the ratios are what gets dialled |
 
-On-device workflow: ① calibrate L (L too low is the dangerous direction); the speed feel is the ratios, dialled per game. ② If real-device noise is far above arena's 0.5px: **lower `PRED_BETA0` first** — don't rush to add filters (that becomes hidden control tuning). ③ Mismatch oscillation → raise `FF_PM_DEG` (lower wn) or raise `FF_ZETA`. ④ After changing any estimator/compensation constant, rerun the wide-delay sweep of `arena.integrate ff_pi_acc` and the FPS behavior test suite `arena.fps_eval ff_pi_acc` to confirm no divergence and no event regression. `FOV_RADIUS`, `KEEP_ALIVE_MS` and the `S_HID_BASE`/`GAIN_PAD_BASE`/`SPD_*` ratio-scale constants are also in the header constants area.
-
-Collection uses raw NV12 (not MJPEG): NV12 is the only format both the Hagibis and the ASUS CU4K30 support at 1080p120, taking ~3Gbps of USB3 bandwidth; don't put two cards on the same USB controller. Preprocessing runs on the GPU (CUDA kernel BGR→RGB CHW) and does not bound the framerate.
+On-device workflow: ① calibrate L (L too low is the dangerous direction); the speed feel is the ratios,
+dialled per game. ② If the real device's noise is far above arena's 0.5px: **lower `PRED_BETA0` first** —
+don't rush to add filters (that becomes hidden control tuning). ③ Mismatch oscillation → raise `FF_PM_DEG`
+(lower wn) or raise `FF_ZETA`. ④ After changing any estimator/compensation constant, rerun the wide-delay
+sweep of `arena.integrate ff_pi_acc` and the FPS behavior test suite `arena.fps_eval ff_pi_acc` to confirm
+no divergence and no event regression; the firmware must also pass `scripts/compile.sh`'s five unit tests on
+the board.
 
 ## arena control-law simulation
 
-`arena/` is a **neutral pure-Python simulator** for fair evaluation/comparison/tuning of control laws. All control-law conclusions stand on its measurements. This machine has no TRT/GStreamer and can't compile .cu, so all control-law exploration happens here; the winner is then ported into the firmware control section (`src/core/control.cu` with `src/core/estimator.cu`).
+`arena/` is a **neutral pure-Python simulator** for fair evaluation/comparison/tuning of control laws. All
+control-law conclusions stand on its measurements. It is platform-independent — a Python 3 interpreter is
+all it needs, nothing the board provides — so all control-law exploration happens on the development
+mirror, and the winner is ported into the firmware control section (`src/core/control.cpp` with
+`src/core/estimator.cpp`).
 
 ### Design principles (important)
 
-- **arena simulates only "plant + sensor"; it contains no estimation/prediction/control logic.** Smith predictors, alpha-beta, Kalman, MPC internal models, etc. are implementation details of a law and don't belong in arena. Swapping laws = swapping one object; any method can be compared fairly.
+- **arena simulates only "plant + sensor"; it contains no estimation/prediction/control logic.** Smith
+  predictors, alpha-beta, Kalman, MPC internal models, etc. are implementation details of a law and don't
+  belong in arena. Swapping laws = swapping one object; any method can be compared fairly.
 - **Minimal interface** (`arena/laws/base.py`):
-  - Observation arena→law: every control tick receives the latest frame `Observation(t, dx, dy, new)`. `dx,dy` = target−crosshair (px), reflecting the world at `t − L_true`, noise included; `new=False` means no new detection since the previous frame.
-  - Input law→arena: `step(t, obs) -> (cx, cy)` integer counts. The law keeps its own detection and command history and does its own estimation/prediction/quantization.
-- **Pure timestamp-driven**: sensing uses the real `L_true`; the `L` a law believes internally is its own business (`cfg.L`). Testing delay mismatch is just setting the two differently — arena supports it natively.
-- **Observation cadence ≠ control cadence**: detections are published at framerate (120/60fps); the firmware control tick is 1kHz (`DEFAULT_FREQ`), modeled in arena at 500Hz (2ms) as the conservative time approximation — 1 arena tick ≈ 2 firmware ticks; the two cadences are modeled separately (~4 arena ticks per frame).
-- **Faithful plant/sensor**: pure delay (a frame reflects the world at t−L; target and crosshair are both sampled at that moment), framerate/control rate, command quantization and clamping (±120 counts), optional detection noise, per-frame detection dropout (`drop_p`), near-instant crosshair response to commands (delay only on the observation side).
-- **Self-test**: a conservative Smith+PI baseline law (`laws/reference.py`) with known behavior (stable convergence, visible ramp-up) validates the arena — if it fails to reproduce these behaviors, fix arena first. Currently passing.
+  - Observation arena→law: every control tick receives the latest frame `Observation(t, dx, dy, new)`.
+    `dx,dy` = target−crosshair (px), reflecting the world at `t − L_true`, noise included; `new=False` means
+    no new detection since the previous frame.
+  - Input law→arena: `step(t, obs) -> (cx, cy)` integer counts. The law keeps its own detection and command
+    history and does its own estimation/prediction/quantization.
+- **Pure timestamp-driven**: sensing uses the real `L_true`; the `L` a law believes internally is its own
+  business (`cfg.L`). Testing delay mismatch is just setting the two differently — arena supports it
+  natively.
+- **Observation cadence ≠ control cadence**: detections are published at framerate (120/60fps); the firmware
+  control tick is 1kHz (`DEFAULT_FREQ`), modeled in arena at 500Hz (2ms) as the conservative time
+  approximation — 1 arena tick ≈ 2 firmware ticks; the two cadences are modeled separately (~4 arena ticks
+  per frame).
+- **Faithful plant/sensor**: pure delay (a frame reflects the world at t−L; target and crosshair are both
+  sampled at that moment), framerate/control rate, command quantization and clamping (±120 counts), optional
+  detection noise, per-frame detection dropout (`drop_p`), near-instant crosshair response to commands
+  (delay only on the observation side).
+- **Self-test**: a conservative Smith+PI baseline law (`laws/reference.py`) with known behavior (stable
+  convergence, visible ramp-up) validates the arena — if it fails to reproduce these behaviors, fix arena
+  first. Currently passing.
 
 ### Files & running
 
@@ -370,7 +889,11 @@ arena/
     └── reseed_pi.py   pole-placement PI + type-2 FF + evidence-gated CUSUM re-seeding
 ```
 
-Dependencies: stdlib + numpy (Kalman/MPC) + scipy (DARE solve for MPC); see `requirements.txt`. **This machine (Windows dev mirror) must use a venv; `--break-system-packages` is forbidden**: `python3.12 -m venv .venv` → `.venv\Scripts\python.exe -m pip install -r requirements.txt`. `.venv/` is not committed (gitignored); after cloning, rebuild with the commands above. All arena commands use the venv interpreter (Windows: `.venv\Scripts\python.exe`; Linux: `.venv/bin/python`). The Jetson doesn't need arena.
+Dependencies: stdlib + numpy (Kalman/MPC) + scipy (DARE solve for MPC); see `requirements.txt`. **The
+Windows mirror must use a venv; `--break-system-packages` is forbidden**: `python3.12 -m venv .venv` →
+`.venv\Scripts\python.exe -m pip install -r requirements.txt`. `.venv/` is not committed (gitignored); after
+cloning, rebuild with the commands above. All arena commands use the venv interpreter (Windows:
+`.venv\Scripts\python.exe`; Linux: `.venv/bin/python`).
 
 ```bash
 .venv\Scripts\python.exe -m arena.selftest            # reference-law self-test (validates arena alignment)
@@ -384,22 +907,56 @@ Dependencies: stdlib + numpy (Kalman/MPC) + scipy (DARE solve for MPC); see `req
 .venv\Scripts\python.exe -m arena.diag ff_pi_acc --suite         # same, at standard-suite composite level
 ```
 
-**Why 2D screen space is the right arena (and not "3D")**: the whole sense-control loop lives in screen pixels (capture → detect → dx,dy → law → counts → crosshair); the 3D game world is just one generator of screen-space trajectories, and the law never sees the world. The FPS behavior library (`fps.py`) therefore models the *screen-space shape* of 3D behaviors: jumps are parabolas on screen-y only (world-vertical motion projects to screen-vertical, orthogonal to any strafe heading), strafe heading is a free angle, wall-bounce is a full 2V velocity reversal, jump-landing is a hard y-velocity step. The only unmodeled 3D effect is tan-projection nonlinearity (s varies by sec² across the screen): ~2.4% inside the ±150px FOV circle — negligible; a 3D world+camera+projection Target subclass can be added later without touching core.
+**Why 2D screen space is the right arena (and not "3D")**: the whole sense-control loop lives in screen
+pixels (capture → detect → dx,dy → law → counts → crosshair); the 3D game world is just one generator of
+screen-space trajectories, and the law never sees the world. The FPS behavior library (`fps.py`) therefore
+models the *screen-space shape* of 3D behaviors: jumps are parabolas on screen-y only (world-vertical motion
+projects to screen-vertical, orthogonal to any strafe heading), strafe heading is a free angle, wall-bounce
+is a full 2V velocity reversal, jump-landing is a hard y-velocity step. The only unmodeled 3D effect is
+tan-projection nonlinearity (s varies by sec² across the screen): ~2.4% inside the ±150px FOV circle —
+negligible; a 3D world+camera+projection Target subclass can be added later without touching core.
 
-**Adding a new law**: create a file in `laws/`, subclass `Law`, `@register("name")`, implement `reset(cfg)`/`step(t,obs)->(cx,cy)`, and add an import line in `laws/__init__.py`. See `arena/AUTHORING.md`.
-**Adding a new scenario**: write a `Target` subclass + `Scenario` in `scenarios.py` and add it to `standard_suite()` (all laws are then evaluated on the same scenario automatically).
+**Adding a new law**: create a file in `laws/`, subclass `Law`, `@register("name")`, implement
+`reset(cfg)`/`step(t,obs)->(cx,cy)`, and add an import line in `laws/__init__.py`. See `arena/AUTHORING.md`.
+**Adding a new scenario**: write a `Target` subclass + `Scenario` in `scenarios.py` and add it to
+`standard_suite()` (all laws are then evaluated on the same scenario automatically).
 **Adding a new metric**: add a function in `metrics.py`, aggregate in `runner.py`.
 
 ### Process tracing (`arena/trace.py`, debug-only)
 
-Aggregate finals alone do not show where a law breaks; `trace.py` replays **one** law × **one** scenario and shows where it breaks: per-tick CSV (`t/ex/ey/|e|/sent counts/new-frame/obs fields`), a compact terminal summary (band-entry ladder 10/5/3/1px, `event_metrics` event windows, worst-1s window, tail-oscillation verdict), event/auto window export, optional PNG. **Pure observation by construction** (law proxy; core/runner untouched) — the three default test suites are bit-identical with or without it (verified by diff). Optional law-side protocol: a law may implement `debug() -> dict[str, float]`; trace records it per tick as `dbg_*` columns — field names/semantics belong to the law's own docstring, arena never interprets them; `debug()` must be side-effect-free and is never called by eval/integrate/fps_eval. `laws/__init__.py` auto-imports `_wip_*.py` experiment copies (register as `wip_<name>`) so parallel debugging never touches the shared file; a broken WIP file is skipped with a stderr note, never blocks the real laws. Trace outputs live in gitignored `arena/trace_out/`.
+Aggregate finals alone do not show where a law breaks; `trace.py` replays **one** law × **one** scenario and
+shows where it breaks: per-tick CSV (`t/ex/ey/|e|/sent counts/new-frame/obs fields`), a compact terminal
+summary (band-entry ladder 10/5/3/1px, `event_metrics` event windows, worst-1s window, tail-oscillation
+verdict), event/auto window export, optional PNG. **Pure observation by construction** (law proxy;
+core/runner untouched) — the three default test suites are bit-identical with or without it (verified by
+diff). Optional law-side protocol: a law may implement `debug() -> dict[str, float]`; trace records it per
+tick as `dbg_*` columns — field names/semantics belong to the law's own docstring, arena never interprets
+them; `debug()` must be side-effect-free and is never called by eval/integrate/fps_eval. `laws/__init__.py`
+auto-imports `_wip_*.py` experiment copies (register as `wip_<name>`) so parallel debugging never touches the
+shared file; a broken WIP file is skipped with a stderr note, never blocks the real laws. Trace outputs live
+in gitignored `arena/trace_out/`.
 
 ### Error attribution: where a law's error actually lives (`arena/diag.py`, debug-only)
 
-Aggregate finals — including the FPS suite's headline `over = peak − median|e| over the 200 ms before the event` — are **relative**. Once a law is already trailing for a long time before an event (the airborne phase of a jump is the canonical case), `pre` is already large, so `over` stays small and the sustained trailing is invisible in both `over` and the scenario-wide RMSE (diluted by the normal ground-phase tracking). Two instruments close that hole:
+Aggregate finals — including the FPS suite's headline `over = peak − median|e| over the 200 ms before the
+event` — are **relative**. Once a law is already trailing for a long time before an event (the airborne phase
+of a jump is the canonical case), `pre` is already large, so `over` stays small and the sustained trailing is
+invisible in both `over` and the scenario-wide RMSE (diluted by the normal ground-phase tracking). Two
+instruments close that hole:
 
-- **`metrics.phase_metrics`** — scenarios declare sustained-phase windows (`Scenario.phases`; the jump / bhop / wall-bounce / dash / slide entries in `fps_suite` declare `air`/`dash`/`slide`) and report rmse/mean/p95/max plus `on_body` (|e| ≤ `metrics.body_px(dist_m)`, the torso half-width at the scenario's engagement distance). The band must scale with distance: a fixed band systematically understates hits up close (a 0.25 m half-width is 80 px at 3 m, 24 px at 10 m). `fps_eval` prints the phase table and an `[air]` aggregate. `Scenario.dist_m` also carries the **1/d projection scaling** used by the near-range jump entries: screen velocity and screen gravity both ∝ 1/d, so the same world jump at distance d is the 10 m calibration times (10/d), with air time 2·v_z/g and hence arc apex ∝ 1/d.
-- **`arena.diag`** — replays the *same* law with only its velocity state replaced by the true velocity at the observation's capture time `t−L_true`: the newest world state its information set could recover, i.e. the honest **causal** bound (using the truth at `t` would be peeking at future maneuvers). The pair of runs splits a scenario's error into the estimator-limited part (`est_share = 1 − oracle/law`) and the residual that delay, loop bandwidth and actuator saturation set.
+- **`metrics.phase_metrics`** — scenarios declare sustained-phase windows (`Scenario.phases`; the jump /
+  bhop / wall-bounce / dash / slide entries in `fps_suite` declare `air`/`dash`/`slide`) and report
+  rmse/mean/p95/max plus `on_body` (|e| ≤ `metrics.body_px(dist_m)`, the torso half-width at the scenario's
+  engagement distance). The band must scale with distance: a fixed band systematically understates hits up
+  close (a 0.25 m half-width is 80 px at 3 m, 24 px at 10 m). `fps_eval` prints the phase table and an
+  `[air]` aggregate. `Scenario.dist_m` also carries the **1/d projection scaling** used by the near-range
+  jump entries: screen velocity and screen gravity both ∝ 1/d, so the same world jump at distance d is the
+  10 m calibration times (10/d), with air time 2·v_z/g and hence arc apex ∝ 1/d.
+- **`arena.diag`** — replays the *same* law with only its velocity state replaced by the true velocity at the
+  observation's capture time `t−L_true`: the newest world state its information set could recover, i.e. the
+  honest **causal** bound (using the truth at `t` would be peeking at future maneuvers). The pair of runs
+  splits a scenario's error into the estimator-limited part (`est_share = 1 − oracle/law`) and the residual
+  that delay, loop bandwidth and actuator saturation set.
 
 Shipped law, matched L=50 / 120 fps / noise 0.5 / seeds 1–3:
 
@@ -413,19 +970,75 @@ Shipped law, matched L=50 / 120 fps / noise 0.5 / seeds 1–3:
 | maneuver / all | 19.00 | 10.29 | 46% | 79% → 95% |
 | fps_dash / dash | 70.64 | 54.48 | **23%** | 16% → 16% |
 
-The jump / bhop / bounce / maneuver family is **estimator-limited** (42–64% of the error is the α-β velocity estimate; with a perfect one the on-body fraction reaches 89–98%). `fps_dash` is not — its burst (4 × 0.4 = 1.6 px/ms) exceeds the 1.5 px/ms speed cap, so the crosshair is saturated and on-body stays at 16% even with a perfect velocity: a speed-cap problem is not a control-law problem, and no estimator work fixes it. Raising the cap confirms the ordering — `arena.diag ff_pi_acc fps_dash --max-v 3` moves the oracle from 54.5 to 35.4 px and on-body 16% → 43%, while the law itself barely moves (70.6 → 70.0, the estimator cannot use the higher cap); the cap is that phase's first constraint and latency its second. The 3 m jump is mixed, because the cap binds wherever |v_z| exceeds it — which is why its est_share falls to 42%.
+The jump / bhop / bounce / maneuver family is **estimator-limited** (42–64% of the error is the α-β velocity
+estimate; with a perfect one the on-body fraction reaches 89–98%). `fps_dash` is not — its burst
+(4 × 0.4 = 1.6 px/ms) exceeds the 1.5 px/ms speed cap, so the crosshair is saturated and on-body stays at
+16% even with a perfect velocity: a speed-cap problem is not a control-law problem, and no estimator work
+fixes it. Raising the cap confirms the ordering — `arena.diag ff_pi_acc fps_dash --max-v 3` moves the oracle
+from 54.5 to 35.4 px and on-body 16% → 43%, while the law itself barely moves (70.6 → 70.0, the estimator
+cannot use the higher cap); the cap is that phase's first constraint and latency its second. The 3 m jump is
+mixed, because the cap binds wherever |v_z| exceeds it — which is why its est_share falls to 42%.
 
-At composite level the same substitution gives **matched 114.66 → 54.06 and worst mismatch 125.12 → 87.69** (`arena.diag <law> --suite`): the mismatch band does *not* degrade, so the architecture tolerates a correct velocity estimate. The estimator's remaining error is its own transient behaviour rather than noise — the β leak turns a 40 px *position* step into a 0.14 px/ms ghost velocity that the feedforward projects over the whole Smith horizon, and acquiring a velocity step takes ~1/β ≈ 278 ms, longer than a whole jump.
+At composite level the same substitution gives **matched 114.66 → 54.06 and worst mismatch 125.12 → 87.69**
+(`arena.diag <law> --suite`): the mismatch band does *not* degrade, so the architecture tolerates a correct
+velocity estimate. The estimator's remaining error is its own transient behaviour rather than noise — the β
+leak turns a 40 px *position* step into a 0.14 px/ms ghost velocity that the feedforward projects over the
+whole Smith horizon, and acquiring a velocity step takes ~1/β ≈ 278 ms, longer than a whole jump.
 
 Constraints for any future estimator work (each measured, each a constraint rather than a preference):
 
-- **A persistently faster gain is forbidden.** `PRED_BETA0` = 0.06 fails the band: at L_true = 30 the step response hunts and never enters the 3 px band (overshoot 24 px). β0 = 0.03 is pinned by loop gain and phase, not by innovation magnitude.
-- **Robustifying the β input does not rescue it.** Clipping the velocity update's innovation (M-estimator style) buys a little on the mismatch band but costs matched and framerate consistency; the exact trade depends on where the clip is inserted, and no variant rescues β0 = 0.06, which fails the band exactly as before. The filter already clips the cleaned innovation at `SIG_CLIP_K`, so a second clip above that point is a no-op.
-- **Only an evidence-gated one-shot correction can be both fast and safe.** A σ̂-normalized one-sided agreement CUSUM with a one-shot velocity catch-up holds the mismatch band with no divergence — the σ̂ self-widening that makes the reset robust also blinds any σ-normalized gate under mismatch — but as tuned it loses on the composite, because detection dropouts and ordinary maneuvers produce the same sustained same-sign innovation signature as a takeoff. Its amplitude must be the alarm-window mean; taking the last frame's innovation alone is markedly worse on both the matched composite and accel tracking. The residual difficulty is structural rather than a matter of sizing: the window-mean innovation also carries the α-β *position* transient, so a catch-up dimensioned by it over-shoots and costs the airborne on-body fraction.
-- **An attention/arming test cannot share the alarm's scale.** A deadband suppressing contradiction accumulation below a σ̂ multiple removes ~91% of all alarms and improves matched and framerate consistency, but it also removes the reset that flushes v̂ at real reversals (a clearly worse strafe-switch event overshoot at a 2σ̂ multiple), and it **self-blinds at the largest maneuvers**: at a 2V wall-bounce the discarded velocity is 0.45 px/ms — unambiguously real — yet classified as noise, because the bounce inflates σ̂ to ≈ 4.4 px so 2σ̂ ≈ 8.8 exceeds |v̂|·dt ≈ 3.8. Magnitude alone cannot be the discriminant either: over a full pass of the standard + FPS suites (baseline law, CUSUM resets that zero a velocity) the discarded velocity is a continuum running from the estimate's own velocity noise floor σ_v up to full target speed, so a magnitude threshold either keeps most false alarms or loses most real ones.
-- **The â channel's rebuild suppression is not the airborne bottleneck.** A noise-level v̂ (≈0.008 px/ms) does arm the CUSUM and can hold the rebuild suppression for ~417 ms, but forcing that suppression off changes the 10 m airborne RMSE by 0.02 px (18.90 → 18.88) — the estimate itself is what trails, not the gate that hides it.
-- **Velocity-estimate bandwidth is the airborne ceiling, and it is exactly the mismatch margin.** `arena.diag` attributes 42–64% of the airborne RMSE to the velocity state (causal bound 6.99–39.4 px against the law's 18.90–68.26 px), and the entire gap is estimator bandwidth: `FFPiAccLaw(beta0=0.04)` — the first value that breaks the L20 corner, where the step response hunts and never settles (0.035 still passes, with a worse composite) — buys 5.6% (10 m airborne 18.90 → 17.85), `beta0=0.06` buys 17% (15.67) and hunts at L_true = 30, and `imm_pi`, the library's own fast estimator, reaches 10.92 px on the same scenario while failing the same band. Splitting the two places v̂ is consumed (the Smith assembly and the feedforward) does not separate the gain from the instability — a fast channel diverges through either path. The estimator a challenger must supply is therefore not a faster one but one whose error is *uncorrelated with the loop's own motion*: error that correlates with it closes a positive feedback whose gain rises with the mismatch, which is why every bandwidth increase is paid for in margin rather than being free tracking speed.
-- **The â channel's gates are not where its headroom lies; its sensor is its own ceiling.** The significance floor forms the noise scale as the second moment of the clipped cleaned innovation minus ȳ², so the signal's own variance is booked as noise — during a 10 m jump the implied noise reads ≈1.3 px against a 0.5 px detection noise — and the floor therefore rises with the very maneuver it is meant to detect. Each gate lifted alone is worth under a pixel; lifting the floor, the rebuild suppression and the CUSUM contradiction gate together still leaves most of the oracle gap, because ȳ is an EMA of a transient-dominated clipped innovation and carries only a fraction of the true acceleration. The contradiction gate is self-blocking by construction — the CUSUM declares a contradiction precisely because the α-β velocity lags, which is what the channel exists to correct — but it is load-bearing elsewhere: removing it trades airborne RMSE for FPS event overshoot and recovery. A challenger has to replace the sensor formulation, not the gates around it.
+- **A persistently faster gain is forbidden.** `PRED_BETA0` = 0.06 fails the band: at L_true = 30 the step
+  response hunts and never enters the 3 px band (overshoot 24 px). β0 = 0.03 is pinned by loop gain and
+  phase, not by innovation magnitude.
+- **Robustifying the β input does not rescue it.** Clipping the velocity update's innovation (M-estimator
+  style) buys a little on the mismatch band but costs matched and framerate consistency; the exact trade
+  depends on where the clip is inserted, and no variant rescues β0 = 0.06, which fails the band exactly as
+  before. The filter already clips the cleaned innovation at `ACC_SIG_CLIP_K`, so a second clip above that
+  point is a no-op.
+- **Only an evidence-gated one-shot correction can be both fast and safe.** A σ̂-normalized one-sided
+  agreement CUSUM with a one-shot velocity catch-up holds the mismatch band with no divergence — the σ̂
+  self-widening that makes the reset robust also blinds any σ-normalized gate under mismatch — but as tuned
+  it loses on the composite, because detection dropouts and ordinary maneuvers produce the same sustained
+  same-sign innovation signature as a takeoff. Its amplitude must be the alarm-window mean; taking the last
+  frame's innovation alone is markedly worse on both the matched composite and accel tracking. The residual
+  difficulty is structural rather than a matter of sizing: the window-mean innovation also carries the α-β
+  *position* transient, so a catch-up dimensioned by it over-shoots and costs the airborne on-body fraction.
+- **An attention/arming test cannot share the alarm's scale.** A deadband suppressing contradiction
+  accumulation below a σ̂ multiple removes ~91% of all alarms and improves matched and framerate consistency,
+  but it also removes the reset that flushes v̂ at real reversals (a clearly worse strafe-switch event
+  overshoot at a 2σ̂ multiple), and it **self-blinds at the largest maneuvers**: at a 2V wall-bounce the
+  discarded velocity is 0.45 px/ms — unambiguously real — yet classified as noise, because the bounce
+  inflates σ̂ to ≈ 4.4 px so 2σ̂ ≈ 8.8 exceeds |v̂|·dt ≈ 3.8. Magnitude alone cannot be the discriminant
+  either: over a full pass of the standard + FPS suites (baseline law, CUSUM resets that zero a velocity) the
+  discarded velocity is a continuum running from the estimate's own velocity noise floor σ_v up to full
+  target speed, so a magnitude threshold either keeps most false alarms or loses most real ones.
+- **The â channel's rebuild suppression is not the airborne bottleneck.** A noise-level v̂ (≈0.008 px/ms)
+  does arm the CUSUM and can hold the rebuild suppression for ~417 ms, but forcing that suppression off
+  changes the 10 m airborne RMSE by 0.02 px (18.90 → 18.88) — the estimate itself is what trails, not the
+  gate that hides it.
+- **Velocity-estimate bandwidth is the airborne ceiling, and it is exactly the mismatch margin.** `arena.diag`
+  attributes 42–64% of the airborne RMSE to the velocity state (causal bound 6.99–39.4 px against the law's
+  18.90–68.26 px), and the entire gap is estimator bandwidth: `FFPiAccLaw(beta0=0.04)` — the first value that
+  breaks the L20 corner, where the step response hunts and never settles (0.035 still passes, with a worse
+  composite) — buys 5.6% (10 m airborne 18.90 → 17.85), `beta0=0.06` buys 17% (15.67) and hunts at
+  L_true = 30, and `imm_pi`, the library's own fast estimator, reaches 10.92 px on the same scenario while
+  failing the same band. Splitting the two places v̂ is consumed (the Smith assembly and the feedforward)
+  does not separate the gain from the instability — a fast channel diverges through either path. The
+  estimator a challenger must supply is therefore not a faster one but one whose error is *uncorrelated with
+  the loop's own motion*: error that correlates with it closes a positive feedback whose gain rises with the
+  mismatch, which is why every bandwidth increase is paid for in margin rather than being free tracking
+  speed.
+- **The â channel's gates are not where its headroom lies; its sensor is its own ceiling.** The significance
+  floor forms the noise scale as the second moment of the clipped cleaned innovation minus ȳ², so the
+  signal's own variance is booked as noise — during a 10 m jump the implied noise reads ≈1.3 px against a
+  0.5 px detection noise — and the floor therefore rises with the very maneuver it is meant to detect. Each
+  gate lifted alone is worth under a pixel; lifting the floor, the rebuild suppression and the CUSUM
+  contradiction gate together still leaves most of the oracle gap, because ȳ is an EMA of a
+  transient-dominated clipped innovation and carries only a fraction of the true acceleration. The
+  contradiction gate is self-blocking by construction — the CUSUM declares a contradiction precisely because
+  the α-β velocity lags, which is what the channel exists to correct — but it is load-bearing elsewhere:
+  removing it trades airborne RMSE for FPS event overshoot and recovery. A challenger has to replace the
+  sensor formulation, not the gates around it.
 
 ### Leaderboard results (`arena.integrate`, all laws tuned from principles; lower is better)
 
@@ -445,51 +1058,175 @@ Constraints for any future estimator work (each measured, each a constraint rath
 | reference | 209.7 | 235.8 | 173.9 | 771 | 2.4% | L80 | light |
 | imm_pi | inf | **104.0** | inf | 389 | 10.3% | L20–40 & L70–80 + s0.7 settle-fail | light |
 
-\* reseed_pi's fps-delta is a denominator effect: on the 60fps side step×2/const_vel/accel are bit-identical to 120fps behavior and maneuver moves +0.5px; the improved 120fps composite shrinks the ratio. The FPS behavior tests (`arena.fps_eval`) are the meaningful law-vs-law comparison.
+\* reseed_pi's fps-delta is a denominator effect: on the 60fps side step×2/const_vel/accel are bit-identical
+to 120fps behavior and maneuver moves +0.5px; the improved 120fps composite shrinks the ratio. The FPS
+behavior tests (`arena.fps_eval`) are the meaningful law-vs-law comparison.
 
-### The shipped law (ff_pi_acc → `src/core/control.cu`)
+### The shipped law (ff_pi_acc → `src/core/control.cpp`)
 
-**Core constraint (low patch-smell / generalization first)**: reject parameters "tuned by trial that cannot be explained from principle" (games change, and the tests don't run in-game). Therefore:
+**Core constraint (low patch-smell / generalization first)**: reject parameters "tuned by trial that cannot
+be explained from principle" (games change, and the tests don't run in-game). Therefore:
 
-- **The convergence bandwidth `wn` is always derived from the calibrated delay `L`**: `wn = (90°−PM)·π/180 / L`, PM=50° (a dimensionless design choice — the fastest point the delay band accepts outright: L20–70 and s0.7–1.3, with the L80 corner settling on the 3 px edge and no divergence), auto-scaling with `L`; **no hardcoded tuned constants**. At L=50, wn≈0.01396 rad/ms.
-- **The type-2 velocity feedforward `FF_GAIN_VAL=1`** comes from the plant model (integrator): it is the exact open-loop command for zero trail on constant-velocity targets, not a tuning knob; when the target model breaks the FF is **withdrawn on measurement evidence** (innovation-gated), not re-aimed — re-aiming needs a fast v̂, which raises estimator loop gain and diverges under mismatch (measured).
-- **Damping ratio ζ and phase margin PM are dimensionless design choices** (ff_pi ζ=1 critical damping; PM=50° chosen by the mismatch-band test suite).
-- The truly free knobs are few, and each is explainable from principle; empirical ones are explicitly labeled in each law's docstring.
+- **The convergence bandwidth `wn` is always derived from the calibrated delay `L`**:
+  `wn = (90°−PM)·π/180 / L`, PM=50° (a dimensionless design choice — the fastest point the delay band
+  accepts outright: L20–70 and s0.7–1.3, with the L80 corner settling on the 3 px edge and no divergence),
+  auto-scaling with `L`; **no hardcoded tuned constants**. At L=50, wn≈0.01396 rad/ms.
+- **The type-2 velocity feedforward `FF_GAIN_VAL=1`** comes from the plant model (integrator): it is the
+  exact open-loop command for zero trail on constant-velocity targets, not a tuning knob; when the target
+  model breaks the FF is **withdrawn on measurement evidence** (innovation-gated), not re-aimed — re-aiming
+  needs a fast v̂, which raises estimator loop gain and diverges under mismatch (measured).
+- **Damping ratio ζ and phase margin PM are dimensionless design choices** (ff_pi ζ=1 critical damping;
+  PM=50° chosen by the mismatch-band test suite).
+- The truly free knobs are few, and each is explainable from principle; empirical ones are explicitly
+  labeled in each law's docstring.
 
-**Why ff_pi_acc is the shipped law** — the best balance of tracking/lock AND maneuver overshoot in the library: matched composite 114.7 (step settle 277ms / 3.11px, accel rmse 4.4px, maneuver rmse 19.4px, relock 386ms), FPS behavior suite RMSE 20.4px / event overshoot 28.0px, holding the delay band L20–70 and s0.7–1.3 with no divergence (L80 rides the 3px settle knife edge, as the leaderboard's boundary column states), at fpsΔ 1.9%. The CUSUM-reset mechanism is principled: a broken target model (stop/reversal) is handled by discarding the contradicted velocity state and re-running the proven step response, not by patching gains. The â channel follows the same discipline: innovation-mean acceleration inversion is admitted only on sustained, plausibility-checked evidence (rebuild suppression + own-acceleration activity gate + significance floor), and with the channel shut (no sustained real acceleration) the command stream is that of the plain PI+FF structure, bit for bit.
+**Why ff_pi_acc is the shipped law** — the best balance of tracking/lock AND maneuver overshoot in the
+library: matched composite 114.7 (step settle 277ms / 3.11px, accel rmse 4.4px, maneuver rmse 19.4px, relock
+386ms), FPS behavior suite RMSE 20.4px / event overshoot 28.0px, holding the delay band L20–70 and s0.7–1.3
+with no divergence (L80 rides the 3px settle knife edge, as the leaderboard's boundary column states), at
+fpsΔ 1.9%. The CUSUM-reset mechanism is principled: a broken target model (stop/reversal) is handled by
+discarding the contradicted velocity state and re-running the proven step response, not by patching gains.
+The â channel follows the same discipline: innovation-mean acceleration inversion is admitted only on
+sustained, plausibility-checked evidence (rebuild suppression + own-acceleration activity gate + significance
+floor), and with the channel shut (no sustained real acceleration) the command stream is that of the plain
+PI+FF structure, bit for bit.
 
-The firmware implements this law: the capture thread's filter update (`core/estimator.cu`) carries the â sensor (cleaned innovation → robust scale → own-acceleration gate → gated ȳ EMA → inversion) and the control tick (`core/control.cu`) assembles ê with (v̂+ε) and ½â·W² — mirroring `arena/laws/ff_pi_acc.py` line for line. Any future challenger must beat ff_pi_acc under the same triple gate before replacing it.
+The firmware implements this law: the capture thread's filter update (`core/estimator.cpp`) carries the â
+sensor (cleaned innovation → robust scale → own-acceleration gate → gated ȳ EMA → inversion) and the control
+tick (`core/control.cpp`) assembles ê with (v̂+ε) and ½â·W² — mirroring `arena/laws/ff_pi_acc.py` line for
+line. Any future challenger must beat ff_pi_acc under the same triple gate before replacing it.
 
-**Laws not shipped** (kept in `arena/`): `ballistic_ff` has the fastest convergence segment (step settle 167ms, relock 219ms, accel 3.9px) but pays worst-mismatch 135.0 and slightly higher event overshoot under flaky detection, and keeps the L80 settle-fail. `sliding_obs` is the robustness record (full L20–80 + s0.7–1.3 band, flattest profile, OVERALL 138.1) but its P-only tail makes first-reach slow, and hard y-axis stops can trip the CUSUM reset. `mpc_osc` holds the best worst-mismatch (113.4) and fixes L20, but solves a QP per tick — unverified against Jetson 1kHz embedded compute — and keeps the L80 knife-edge. `pi_guard` is pi_pm's no-FF structure plus model-break reset (full band pass); without FF the accel lag a/(Ki·ig) is structural. `kalman_pi`/`smith_filt` are covered on the Pareto front: the Kalman estimator's model overtrust makes a FF+CUSUM pack unfixable under mismatch (measured across 50+ configurations), and smith_filt's settle/relock/recovery records (151ms/198ms/9ms) are bound to an unfiltered extrapolation whose L80/s0.7 corners are structural. `pi_pm`/`sliding`/`ballistic` remain as undominated baselines (their successors carry disclosed regressions). `imm_pi` is the best matched/FPS law of the whole set (accel 4.3px / maneuver 13.6px, FPS RMSE 17.1px / event recovery 7ms) but fails the mismatch band outright. `reseed_pi` keeps the shipped law's nominal behavior with an evidence-gated seed (exact counts-window junk bound) and ties the zero-reset design at the mismatch edge (125.6 vs 125.1) while keeping the tail gains. If a different trade-off is ever needed, port the corresponding law's `step()` into `src/core/control.cu` and `src/core/estimator.cu` (units/quantization/counts/estimator must match line for line).
+**Laws not shipped** (kept in `arena/`): `ballistic_ff` has the fastest convergence segment (step settle
+167ms, relock 219ms, accel 3.9px) but pays worst-mismatch 135.0 and slightly higher event overshoot under
+flaky detection, and keeps the L80 settle-fail. `sliding_obs` is the robustness record (full L20–80 + s0.7–1.3
+band, flattest profile, OVERALL 138.1) but its P-only tail makes first-reach slow, and hard y-axis stops can
+trip the CUSUM reset. `mpc_osc` holds the best worst-mismatch (113.4) and fixes L20, but solves a QP per tick
+— unverified against the board's embedded compute — and keeps the L80 knife-edge. `pi_guard` is pi_pm's no-FF
+structure plus model-break reset (full band pass); without FF the accel lag a/(Ki·ig) is structural.
+`kalman_pi`/`smith_filt` are covered on the Pareto front: the Kalman estimator's model overtrust makes a
+FF+CUSUM pack unfixable under mismatch (measured across 50+ configurations), and smith_filt's
+settle/relock/recovery records (151ms/198ms/9ms) are bound to an unfiltered extrapolation whose L80/s0.7
+corners are structural. `pi_pm`/`sliding`/`ballistic` remain as undominated baselines (their successors carry
+disclosed regressions). `imm_pi` is the best matched/FPS law of the whole set (accel 4.3px / maneuver 13.6px,
+FPS RMSE 17.1px / event recovery 7ms) but fails the mismatch band outright. `reseed_pi` keeps the shipped
+law's nominal behavior with an evidence-gated seed (exact counts-window junk bound) and ties the zero-reset
+design at the mismatch edge (125.6 vs 125.1) while keeping the tail gains. If a different trade-off is ever
+needed, port the corresponding law's `step()` into `src/core/control.cpp` and `src/core/estimator.cpp`
+(units/quantization/counts/estimator must match line for line).
 
-**Rejected paths (documented so they aren't re-explored)**: re-aiming the FF through a fast second velocity channel raises estimator loop gain and diverges at L30–70; hot design points (PM45–55 × β0≥0.06) pass matched but their estimator contamination makes step hunting at the band edges — the mismatch band is the hard constraint of the linear Smith+PI+FF family, and PM50/β0.03 is its test-suite-selected fastest point. Always-on maneuver-adaptive estimation (IMM, `imm_pi`) dies the same death from inside the estimator: under mismatch the Smith window misalignment turns own-command transients into large innovations, large innovations always favor the wide-covariance maneuver model, and the resulting ghost v̂ closes its loop through the physical plant — every σ̂-normalized gate (NIS authority gate, CUSUM) goes blind exactly when the loop self-oscillates, because the filter's covariance and the σ̂ EMA absorb the oscillation as "noise" (the σ̂ EMA runs away and the NIS gate collapses to unity). Online residual-delay adaptation is unobservable in this bookkeeping: the Smith error is first-order exact under constant velocities (the anchor offset cancels between the α-β velocity bias and the ê assembly), so the innovation carries no steady-state signature of Δ = L_true − L̂ — only transient bursts proportional to own-accel × Δ, which are exactly the frames where any estimate is contaminated. Event-overshoot peaks are bounded below by v·L (delay floor) plus the ~2–3 frame CUSUM alarm latency (set by the anti-false-alarm per-frame cap), so no estimator-side fix can cut them; only the post-peak tail is attackable, and paying mismatch margin for it loses on the composite. Evidence-gated adaptation is the counter-principle that works: keep the adaptive channel closed (or frozen) whenever own-motion contamination is possible and let it in only on sustained, plausibility-checked evidence — the validated instances are ff_pi_acc's triple-gated â channel, mpc_osc's innovation-alternation signature gate, and reseed_pi's window-junk-bound seed gate. Three further walls belong to the same list, each measured rather than assumed: **the FF+CUSUM pack does not transfer onto a Kalman estimator** — its model overtrust (position gain ~0.04/frame vs α-β's 0.5) integrates the signed mismatch junk ∝ own-accel × Δ into v̂ where no gate can separate it from true target motion, and the L20 corner (phantom error v̂·35ms) forbids exactly the estimator bandwidth the accel tail needs (50+ test-suite configurations, all reject); **the filtered-Smith family's L80/s0.7 corners are structural** — the pseudo-residual (window mismatch × own velocity) and real target disturbances are inseparable inside the residual channel, exact cleaning would need L_true which is not in the law's input, and every online gating criterion either leaves one contamination window open or fires on legitimate re-capture transients (const_vel/accel break first); and **imm_pi's premise does not hold** — its steady-state Riccati gain k2 is a per-sample velocity gain used as the per-frame α-β β, so its "low model" runs at β≈0.25 (8.3× the documented 0.03), and that one too-fast channel produces both its matched wins and its mismatch collapse; a steady-gain MMAE rebuilt on the corrected semantics tracks markedly better on matched and accel with L30–70 finite, yet still fails s0.7/L80 and pays a large maneuver and framerate penalty, so it stays out of the library.
+**Rejected paths (documented so they aren't re-explored)**: re-aiming the FF through a fast second velocity
+channel raises estimator loop gain and diverges at L30–70; hot design points (PM45–55 × β0≥0.06) pass
+matched but their estimator contamination makes step hunting at the band edges — the mismatch band is the
+hard constraint of the linear Smith+PI+FF family, and PM50/β0.03 is its test-suite-selected fastest point.
+Always-on maneuver-adaptive estimation (IMM, `imm_pi`) dies the same death from inside the estimator: under
+mismatch the Smith window misalignment turns own-command transients into large innovations, large innovations
+always favor the wide-covariance maneuver model, and the resulting ghost v̂ closes its loop through the
+physical plant — every σ̂-normalized gate (NIS authority gate, CUSUM) goes blind exactly when the loop
+self-oscillates, because the filter's covariance and the σ̂ EMA absorb the oscillation as "noise" (the σ̂ EMA
+runs away and the NIS gate collapses to unity). Online residual-delay adaptation is unobservable in this
+bookkeeping: the Smith error is first-order exact under constant velocities (the anchor offset cancels
+between the α-β velocity bias and the ê assembly), so the innovation carries no steady-state signature of
+Δ = L_true − L̂ — only transient bursts proportional to own-accel × Δ, which are exactly the frames where any
+estimate is contaminated. Event-overshoot peaks are bounded below by v·L (delay floor) plus the ~2–3 frame
+CUSUM alarm latency (set by the anti-false-alarm per-frame cap), so no estimator-side fix can cut them; only
+the post-peak tail is attackable, and paying mismatch margin for it loses on the composite. Evidence-gated
+adaptation is the counter-principle that works: keep the adaptive channel closed (or frozen) whenever
+own-motion contamination is possible and let it in only on sustained, plausibility-checked evidence — the
+validated instances are ff_pi_acc's triple-gated â channel, mpc_osc's innovation-alternation signature gate,
+and reseed_pi's window-junk-bound seed gate. Three further walls belong to the same list, each measured
+rather than assumed: **the FF+CUSUM pack does not transfer onto a Kalman estimator** — its model overtrust
+(position gain ~0.04/frame vs α-β's 0.5) integrates the signed mismatch junk ∝ own-accel × Δ into v̂ where no
+gate can separate it from true target motion, and the L20 corner (phantom error v̂·35ms) forbids exactly the
+estimator bandwidth the accel tail needs (50+ test-suite configurations, all reject); **the filtered-Smith
+family's L80/s0.7 corners are structural** — the pseudo-residual (window mismatch × own velocity) and real
+target disturbances are inseparable inside the residual channel, exact cleaning would need L_true which is
+not in the law's input, and every online gating criterion either leaves one contamination window open or
+fires on legitimate re-capture transients (const_vel/accel break first); and **imm_pi's premise does not
+hold** — its steady-state Riccati gain k2 is a per-sample velocity gain used as the per-frame α-β β, so its
+"low model" runs at β≈0.25 (8.3× the documented 0.03), and that one too-fast channel produces both its
+matched wins and its mismatch collapse; a steady-gain MMAE rebuilt on the corrected semantics tracks markedly
+better on matched and accel with L30–70 finite, yet still fails s0.7/L80 and pays a large maneuver and
+framerate penalty, so it stays out of the library.
 
-**Header constants** (constants area of `src/core/control.h`, the calibration ones in `src/core/calib.h`; principled rationale in `arena/laws/ff_pi_acc.py`'s docstring):
+**Header constants** (constants area of `src/core/control.h`, the calibration ones in `src/io/calib_run.h` and
+`src/core/calib.h`; principled rationale in `arena/laws/ff_pi_acc.py`'s docstring):
 
 | constant | default | source |
 |---|---|---|
 | `wn=(90−PM)π/180/L` | PM=50 | principle: delay phase margin, auto-scales with L; 50 = the fastest point the test suite's delay band accepts outright (L20–70, L80 on the 3 px edge) |
 | `FF_GAIN_VAL` / `FF_ZETA` / `FF_I_GATE` | 1.0 / 1.0 / 8.0px | principle (type-2 exact FF) / principle (critical damping) / empirical (settled-region gate + withdrawal scale) |
 | `PRED_ALPHA0/BETA0/L_COMP` | 0.50/0.03/1.10 | estimator (dt-normalized) / estimator (band-edge margin) / Smith over-comp |
+| `CUSUM_K/C/H` | 0.5/3.0/9.0 | σ multiples (Page test: drift / per-frame increment cap / alarm level), auto-widening with device noise |
 | `ACC_SIG_CLIP_K/ACC_TAU_L` | 2.0 / 4.0 | â sensor: Huber clip (σ̂_r multiples, M-estimator standard) / ȳ EMA memory in L̂ units |
 | `ACC_RB_HOLD_N/ACC_OW_ACTIV_K` | 1.5 / 2.0 | â sensor: rebuild hold in v̂-time-constants / own-acceleration activity gate in delay-window units |
 | `ACC_SNR` | 10.0 | â significance floor (white-noise σ multiples; smallest whole value holding the full mismatch band bit-exact) |
 
-### Known limitations
+### Known limitations and unverified behaviour
 
-- arena's default 0.5px noise is optimistic; on a noisier real device ff_pi_acc converges slower — lower `PRED_BETA0` first (see Tuning); in extreme cases fall back to a more conservative design point (raise `FF_PM_DEG`), or port the sliding_obs law from arena (most robust, slowest).
-- The constant-velocity (CV) predictor cannot predict acceleration: constant-accel targets have an a/Ki steady-state lag, removed slowly by the I term (maneuver RMSE ~20px is mostly the delay lower bound, not a law flaw).
-- The speed cap binds before the law does at short range, and it is the first constraint on every fast-transient scenario: `arena.diag` puts only 3% of `fps_approach`'s error — the suite's largest, 45.85 px with a 184 px peak — on the velocity estimate, and `fps_dash` (4×0.4 = 1.6 px/ms) and the parts of `fps_jump_3m` where |v_z| > 1.5 px/ms are saturated the same way. Check `est_share` before attributing such errors to the control law. The cap is a physical requirement rather than a preference: the crosshair must be able to move at least as fast as the target's screen motion (960·v_world/d px/s, f≈960px@1080p), or the error grows without bound. Below that speed the error is a cliff and above it nothing changes — `arena.diag ff_pi_acc fps_approach --max-v 1.7` already moves it 45.85 → 18.88 px — so the useful setting is the smallest one clearing the fastest screen motion the system must face, and 2000 px/s clears the whole behaviour library (10 m dash 1.6, near jump 1.83, approach 1.99 px/ms). Raising it also loosens the integrator clamp and the â channel's limits, which moves the 60/120 fps composite split (60 fps improves in absolute terms; the ratio widens) and the worst-mismatch composite by about a percent — measure with the suites' `max_v` parameter, and see `-x` together with its derivation in the launcher template.
-- mpc_osc solves a QP per tick; 1kHz embedded compute is unverified (feasible in arena at the 2ms tick); shipping it would need explicit MPC or a lower solve rate.
-- Every law degrades under extreme mismatch (|L_true−L̂|>~30ms or s error >~40%) — beyond what calibration should ever produce; ff_pi_acc holds L20–70 + s0.7–1.3 fully, and at the L80 (+30ms) corner its step settle rides the 3px knife edge (final ≈3–4px, no divergence). Rely on calibration, not on the law toughing it out.
-
-- `src/core/estimator.cu` advances the filter's `dt` once per frame regardless of whether a detection was produced (`t_prev` is updated outside the `found` branch), so across a detection gap the prediction advances by a single frame interval and `beta` stays at `PRED_BETA0` — where arena uses the interval since the previous *detection*, which is what invariant 1 means. A re-acquisition frame therefore carries the whole gap's displacement in its innovation, making the `TRACK_JUMP_GATE` hard reset (and its ~417 ms weak-tracking window) more likely. Emulating that deviation (clamping the filter's `dt` to the frame interval) is nevertheless measurably neutral rather than harmful under the flaky FPS variant — airborne RMSE equal to slightly better than the shipped behaviour, with the same on-body fraction — because holding `alpha` at its frame-rate value makes the re-acquisition update more conservative, not less. Correcting it is therefore not a route to the airborne trailing, and carries on-device risk for no measured gain. Changing the control section needs an on-device rebuild.
-- **p5g bring-up status.** Measured on the Orin with the real dongle and a PS5 on the device port: the emulated device's bytes are byte-identical to the dongle's own (`/sys/bus/hid/devices/0003:2B81:0101.*/report_descriptor` dumped and compared byte for byte, 165 bytes; the 48-byte `GET_REPORT(0x03)` reply `03 21 28 03 c3 00 …` reproduces the transcribed definition), the probe's three feature transfers all answer, and the signing round trip measures 2.8 ms mean / 1.5 ms fastest over 8 submissions (`sudo python3 scripts/test/p5g_dongle_probe.py`). With a PS5 as host the console enumerates and configures the device (UDC `state` = `configured` for the whole session while aimbot runs), reads `GET_REPORT(0x03)`, and starts the auth conversation on the first input report carrying the PS/guide button: four type-0x01 challenges then one type-0x02, each forwarded verbatim to the dongle with the F2 signing state read back and answered — and `EP_WRITE` returns the full 64 bytes, i.e. the console takes the signed reports (traced: `USB_RAW_IOCTL_EP_WRITE = 64`, 2082 completions). **Unverified, needs the console's own UI**: whether the PS5 accepts the controller as authenticated and usable in a game, and whether the injected aim lands — the Jetson has no observation channel for either. Dongle-absent behaviour is verified structurally and at runtime (the loop's submission step is guarded by dongle presence and the unit test pins "no report while the dongle is not ready"; on hardware with the dongle hidden from the scan path the process logs the absent line and keeps a live merging pad while producing no report and, unlike a dongle-present run, the console sends no challenge at all).
+- **未验证: the USB output side has not been exercised against a real host from this board.** All three
+  backends' device bytes, report encoders, endpoint bookkeeping and the P5G auth/signing state machine are
+  pinned by `build/pad_test`'s structural assertions; what has *not* been observed here is a real PC reading
+  the emulated 360 pad through XInput, or a real PS5 accepting the presented P5 General device. The
+  dongle-side facts (descriptor identity, feature replies, the signing round trip) are recorded in
+  `docs/p5general/` §14, where the host-acceptance half is explicitly left open.
+- **未验证: the source-mode-change path of the capture rebuild.** A resolution or refresh change across a
+  rebuild (mode switch on the source) is code-read only: the rebuild reads `G_FMT` **after** the lock and
+  allocates the buffers from that format, and both the ordering and the buffer-size rule are derived from
+  the driver's behaviour rather than observed across an actual mode change — the board's signal source is a
+  fixed-mode source, so the walk-through exercised end to end is lock loss → re-lock at an unchanged mode.
+- **未验证: the codeword-length loss of self-converted models.** The measured resolution loss (one quantised
+  tensor carrying both coordinates and confidences) is reported by `model_probe` but not corrected in this
+  repository; the fix belongs to the conversion pipeline, outside it.
+- arena's default 0.5px noise is optimistic; on a noisier real device ff_pi_acc converges slower — lower
+  `PRED_BETA0` first (see Tuning); in extreme cases fall back to a more conservative design point (raise
+  `FF_PM_DEG`), or port the sliding_obs law from arena (most robust, slowest).
+- The constant-velocity (CV) predictor cannot predict acceleration: constant-accel targets have an a/Ki
+  steady-state lag, removed slowly by the I term (maneuver RMSE ~20px is mostly the delay lower bound, not a
+  law flaw).
+- The speed cap binds before the law does at short range, and it is the first constraint on every
+  fast-transient scenario: `arena.diag` puts only 3% of `fps_approach`'s error — the suite's largest, 45.85 px
+  with a 184 px peak — on the velocity estimate, and `fps_dash` (4×0.4 = 1.6 px/ms) and the parts of
+  `fps_jump_3m` where |v_z| > 1.5 px/ms are saturated the same way. Check `est_share` before attributing such
+  errors to the control law. The cap is a physical requirement rather than a preference: the crosshair must
+  be able to move at least as fast as the target's screen motion (960·v_world/d px/s, f≈960px at the 1080p
+  reference), or the error grows without bound. Below that speed the error is a cliff and above it nothing
+  changes — `arena.diag ff_pi_acc fps_approach --max-v 1.7` already moves it 45.85 → 18.88 px — so the useful
+  setting is the smallest one clearing the fastest screen motion the system must face, and 2000 px/s clears
+  the whole behaviour library at the 1080p reference (10 m dash 1.6, near jump 1.83, approach 1.99 px/ms).
+  **It must be rescaled with the source resolution** (see "Tuning"): the deployment signal is 2560×1440, i.e.
+  4/3 of that reference, so the same physical working point is ≈2667 px/s. Raising the cap also loosens the
+  integrator clamp and the â channel's limits, which moves the 60/120 fps composite split (60 fps improves in
+  absolute terms; the ratio widens) and the worst-mismatch composite by about a percent — measure with the
+  suites' `max_v` parameter, and see `-x` together with its derivation in the launcher template.
+- mpc_osc solves a QP per tick; the board's compute is unverified (feasible in arena at the 2ms tick);
+  shipping it would need explicit MPC or a lower solve rate.
+- Every law degrades under extreme mismatch (|L_true−L̂|>~30ms or s error >~40%) — beyond what calibration
+  should ever produce; ff_pi_acc holds L20–70 + s0.7–1.3 fully, and at the L80 (+30ms) corner its step settle
+  rides the 3px knife edge (final ≈3–4px, no divergence). Rely on calibration, not on the law toughing it
+  out.
+- `src/core/estimator.cpp` advances the filter's `dt` once per frame regardless of whether a detection was
+  produced (`t_prev` is updated outside the `found` branch), so across a detection gap the prediction
+  advances by a single frame interval and `beta` stays at `PRED_BETA0` — where arena uses the interval since
+  the previous *detection*, which is what invariant 1 means. A re-acquisition frame therefore carries the
+  whole gap's displacement in its innovation, making the `TRACK_JUMP_GATE` hard reset (and its ~417 ms
+  weak-tracking window) more likely. Emulating that deviation (clamping the filter's `dt` to the frame
+  interval) is nevertheless measurably neutral rather than harmful under the flaky FPS variant — airborne
+  RMSE equal to slightly better than the shipped behaviour, with the same on-body fraction — because holding
+  `alpha` at its frame-rate value makes the re-acquisition update more conservative, not less. Correcting it
+  is therefore not a route to the airborne trailing, and carries board risk for no measured gain. Changing
+  the control section needs a board rebuild.
 
 ### How to rerun & extend
 
 1. `.venv\Scripts\python.exe -m arena.selftest` to confirm arena alignment.
-2. After changing/adding a law: `arena.eval <law>` for the standard test suite; `arena.integrate <law>` for the integration (mismatch/relock/framerate included).
-3. To see *which layer* a scenario's error lives in before changing anything: `arena.diag <law> [scenario ...]` — `est_share` says whether the error is worth attacking with a better estimator (high) or is the delay/loop/saturation bound (low); `arena.trace <law> <scenario> --csv out.csv` gives the per-tick process.
-4. Once a better law is found, port its `step()` logic line for line into the firmware control section (`src/core/control.cu` + `src/core/estimator.cu`). Units/quantization/counts/estimator must match the winning law exactly.
-5. Tuning stands on arena measurements, and **delay mismatch must be tested** (the wide-delay sweep in `integrate.py`); a scheme that diverges under mismatch loses, no matter how fast.
+2. After changing/adding a law: `arena.eval <law>` for the standard test suite; `arena.integrate <law>` for
+   the integration (mismatch/relock/framerate included).
+3. To see *which layer* a scenario's error lives in before changing anything: `arena.diag <law>
+   [scenario ...]` — `est_share` says whether the error is worth attacking with a better estimator (high) or
+   is the delay/loop/saturation bound (low); `arena.trace <law> <scenario> --csv out.csv` gives the per-tick
+   process.
+4. Once a better law is found, port its `step()` logic line for line into the firmware control section
+   (`src/core/control.cpp` + `src/core/estimator.cpp`), then `bash scripts/compile.sh` on the board and run
+   `bin/aimbot` there. Units/quantization/counts/estimator must match the winning law exactly.
+5. Tuning stands on arena measurements, and **delay mismatch must be tested** (the wide-delay sweep in
+   `integrate.py`); a scheme that diverges under mismatch loses, no matter how fast.
