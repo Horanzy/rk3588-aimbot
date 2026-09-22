@@ -434,8 +434,8 @@ void ai_thread(std::string model_path, int target_cls, int num_classes,
                 printf("[AI FPS] %d fps (源 %.2fHz, 窗口 %.1fs) | 取帧 %.2fms (其中等 fence "
                        "%.2f) | RGA %.2fms | NPU %.2fms (pack %.2f H2D %.2f exec %.2f D2H "
                        "%.2f 解码 %.2f) | 合计 %.2fms/帧 | 帧龄(帧时间戳→检测就绪) p50 %.1f "
-                       "p99 %.1f max %.1fms | 等 fence %llu 次 (成功 %llu 次 均值 %.2fms, "
-                       "超时 %llu 次 = 白等 %llu×%dms) | 失锁 %llu 次 停流 %llu 次 | 重建 "
+                       "p99 %.1f max %.1fms | 等 fence %llu 次 (成功 %llu 次 均值 %.2fms) | "
+                       "超时 %llu 次 (白等 %llu×%dms) | 失锁 %llu 次 停流 %llu 次 | 重建 "
                        "%llu 成功 %llu 失败\n",
                        (int)((double)fps_cnt / win_s), src_hz, win_s, sum_wait / n,
                        sum_fence / n, sum_rga / n, sum_npu / n, sum_pack / n, sum_h2d / n,
@@ -444,7 +444,7 @@ void ai_thread(std::string model_path, int target_cls, int num_classes,
                        ages.empty() ? 0.0 : *std::max_element(ages.begin(), ages.end()),
                        (unsigned long long)d_waits,
                        (unsigned long long)(d_waits - d_to),
-                       d_waits > d_to ? d_us / (double)(d_waits - d_to) : 0.0,
+                       d_waits > d_to ? d_us / 1000.0 / (double)(d_waits - d_to) : 0.0,
                        (unsigned long long)d_to, (unsigned long long)d_to,
                        HDMI_FENCE_WAIT_MS,
                        (unsigned long long)(sc.lock_lost - src_prev.lock_lost),
@@ -623,7 +623,7 @@ void ai_thread(std::string model_path, int target_cls, int num_classes,
                       ? in.fence_wait_us_sum() / (double)(in.fence_waits() - n_to) / 1000.0
                       : 0.0)
               << "ms, 最长 " << in.fence_wait_us_max() / 1000.0 << "ms) / fence 超时 " << n_to
-              << " 次 (白等 " << (double)n_to * (double)HDMI_FENCE_WAIT_MS / 1000.0 << "ms)"
+              << " 次 (白等 " << n_to * (unsigned long long)HDMI_FENCE_WAIT_MS << "ms)"
               << " / 失锁 " << in.lock_lost() << " 次 停流 " << in.stalled()
               << " / 重建 " << in.rearm_ok() << " 成功 " << in.rearm_fail() << " 失败"
               << (in.rearm_ok() ? (" (上次恢复耗时 " + std::to_string((long)in.last_rearm_ms()) + "ms)")

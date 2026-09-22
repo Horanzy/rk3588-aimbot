@@ -5,14 +5,16 @@
 //
 //  复现路径 (板端, root):
 //    * 取帧/交付/裁剪对照: ./build/hdmi_probe 600
-//    * 失锁与重建: 给接收器写一份**别的** EDID 会让它落下 HPD, 源随之重新协商 ——
+//    * 失锁与重建: 给接收器写一份**别的** EDID 会让它落下 HPD, 源随之重新协商。让源干脆
+//      不出图的那一份 (内核固件的 1920x1080.bin: 只有基块、没有 HDMI VSDB) 能把失锁按在
+//      原地, 于是"失锁→重建尝试→重锁→复帧"整条路都可以在一个窗口里看完:
 //        sudo v4l2-ctl -d /dev/video0 --set-edid=pad=0,file=/usr/lib/firmware/edid/1920x1080.bin,format=raw
-//      源切到新模式的瞬间接收器失锁、驱动自己停流; 恢复部署 EDID 的做法见
-//      /usr/local/sbin/hdmirx-set-edid.sh (它开机时把 /usr/local/share/hdmirx/1440p120.edid
-//      写进接收器, 是本机 EDID 的权威来源):
+//      恢复部署 EDID 的做法见 /usr/local/sbin/hdmirx-set-edid.sh (它开机时把
+//      /usr/local/share/hdmirx/1440p120.edid 写进接收器, 是本机 EDID 的权威来源):
 //        sudo v4l2-ctl -d /dev/video0 --set-edid=pad=0,file=/usr/local/share/hdmirx/1440p120.edid,format=raw
-//      aimbot 侧看 [HDMI] 的重建行与 [AI FPS] 行的增量段 (等 fence/失锁/重建), 探针侧看
-//      build/hdmi_probe 的结果段 (同一批判据与账)。
+//      验收时以 `--get-edid=…,format=raw` + `cmp` 核对写回逐字节一致。aimbot 侧看 [HDMI]
+//      的重建行与 [AI FPS] 行的增量段 (等 fence/失锁/重建), 探针侧看 build/hdmi_probe 的
+//      结果段 (同一批判据与账); 实测落点与内核日志侧的代价见 io/hdmi_in.h 的实测块。
 // ============================================================================
 
 #include "io/hdmi_in.h"
@@ -267,8 +269,11 @@ bool HdmiIn::arm(std::string* err) {
             close();
             return false;
         }
-        std::printf("[HDMI] 设备 %s (驱动 %s, %s)\n", dev_path_.c_str(), driver_.c_str(),
-                    reinterpret_cast<const char*>(cap.bus_info));
+        if (!device_announced_) {   // 重建期间的每次尝试都重开设备, 这句话只报一次
+            device_announced_ = true;
+            std::printf("[HDMI] 设备 %s (驱动 %s, %s)\n", dev_path_.c_str(), driver_.c_str(),
+                        reinterpret_cast<const char*>(cap.bus_info));
+        }
     }
 
     // ---- 起流前先确已锁定, 锁定之后才读格式 ----
