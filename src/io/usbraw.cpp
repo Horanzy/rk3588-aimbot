@@ -1,5 +1,5 @@
 // ============================================================================
-//  usbraw.cpp — usbraw.h 的实现: UDC 两级名字发现, raw_gadget ioctl 会话
+//  usbraw.cpp — usbraw.h 的实现: UDC 实例名与 gadget 名发现, raw_gadget ioctl 会话
 //    (INIT → RUN → VBUS_DRAW), ep0 标准请求表 (控制线程), 中断 IN 发送线程与
 //    中断 OUT 收取线程。
 //
@@ -20,6 +20,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <iostream>
 #include <string>
 
@@ -64,10 +65,41 @@ const int    OUT_RETIRE_WAIT_MS = 100;
 const int    OUT_ENABLE_TRIES   = 3;
 
 // ---- UDC 名字发现 ----------------------------------------------------------
-// 两级名字: device_name = /sys/class/udc 首个实例目录名; driver_name = 该实例
-//   父设备 driver 链接基名 (对 tegra-xudc 即 "tegra-xudc")。raw_gadget 无
-//   "空名 = 任意 UDC" 通配, gadget_bind 以 strcmp 择 UDC — 名字必须精确,
-//   截断即拒绝。
+// 两个名字都来自 sysfs, 而且是两个不同的字符串:
+//   device_name = /sys/class/udc 下首个实例的目录名 —— 内核按它择 UDC, 名字必须精确,
+//     截断即拒绝 (raw_gadget 没有 "空名 = 任意 UDC" 的通配);
+//   driver_name = 该实例 uevent 里的 USB_UDC_NAME —— 内核寻址 UDC 用的 gadget 名。
+// 后者不能从父设备的 driver 链接去推: 平台驱动名与 gadget 名并非同一字符串
+//   (dwc3 与 dwc3-gadget), 拿平台驱动名绑定会被内核拒绝 (实测 RUN 返回 EBUSY),
+//   而 uevent 里导出的正是内核自己要的那个名字。导出缺 USB_UDC_NAME 时退回平台驱动名。
+static std::string udc_uevent_name(const std::string& inst) {
+    std::ifstream ue("/sys/class/udc/" + inst + "/uevent");
+    std::string line;
+    const std::string key = "USB_UDC_NAME=";
+    while (std::getline(ue, line))
+        if (line.compare(0, key.size(), key) == 0) return line.substr(key.size());
+    return "";
+}
+
+static std::string udc_pdev_driver(const std::string& inst) {
+    char resolved[PATH_MAX];
+    if (!realpath(("/sys/class/udc/" + inst).c_str(), resolved)) return "";
+    std::string p = resolved;                         // .../<pdev>/udc/<inst>
+    size_t slash = p.rfind('/');
+    if (slash == std::string::npos) return "";
+    p.resize(slash);                                  // .../<pdev>/udc
+    slash = p.rfind('/');
+    if (slash == std::string::npos) return "";
+    p.resize(slash);                                  // .../<pdev>
+    p += "/driver";
+    char link[PATH_MAX];
+    ssize_t n = readlink(p.c_str(), link, sizeof(link) - 1);
+    if (n < 0) return "";
+    link[n] = '\0';
+    const char* drv = strrchr(link, '/');
+    return drv ? drv + 1 : link;
+}
+
 static bool discover_udc(struct usb_raw_init* init) {
     DIR* d = opendir("/sys/class/udc");
     if (!d) return false;
@@ -78,27 +110,13 @@ static bool discover_udc(struct usb_raw_init* init) {
     closedir(d);
     if (inst.empty() || inst.size() >= UDC_NAME_LENGTH_MAX) return false;
 
-    char resolved[PATH_MAX];
-    if (!realpath(("/sys/class/udc/" + inst).c_str(), resolved)) return false;
-    std::string p = resolved;                         // .../<pdev>/udc/<inst>
-    size_t slash = p.rfind('/');
-    if (slash == std::string::npos) return false;
-    p.resize(slash);                                  // .../<pdev>/udc
-    slash = p.rfind('/');
-    if (slash == std::string::npos) return false;
-    p.resize(slash);                                  // .../<pdev>
-    p += "/driver";
-    char link[PATH_MAX];
-    ssize_t n = readlink(p.c_str(), link, sizeof(link) - 1);
-    if (n < 0) return false;
-    link[n] = '\0';
-    const char* drv = strrchr(link, '/');
-    drv = drv ? drv + 1 : link;
-    if (strlen(drv) >= UDC_NAME_LENGTH_MAX) return false;
+    std::string drv = udc_uevent_name(inst);
+    if (drv.empty()) drv = udc_pdev_driver(inst);
+    if (drv.empty() || drv.size() >= UDC_NAME_LENGTH_MAX) return false;
 
     memset(init->driver_name, 0, UDC_NAME_LENGTH_MAX);
     memset(init->device_name, 0, UDC_NAME_LENGTH_MAX);
-    memcpy(init->driver_name, drv, strlen(drv));
+    memcpy(init->driver_name, drv.c_str(), drv.size());
     memcpy(init->device_name, inst.c_str(), inst.size());
     return true;
 }
