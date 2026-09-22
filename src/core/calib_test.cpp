@@ -533,7 +533,7 @@ int main() {
             const E2E e = run_e2e(CAL_MODE_HID, {40, 1.5, 0, 0.0, 0, 1}, 120, 3u, true);
             CHECK(!e.ok && std::string(e.r.err).find("静止") != std::string::npos,
                   "画面完全静止 → 失败并说明原因 (不允许硬算)");
-            CHECK(!cal_writeback(CAL_VAR_HID, e.r, path), "失败路径不写回");
+            CHECK(!cal_writeback(CAL_VAR_HID, e.r, e.r.l_est, path), "失败路径不写回");
         }
         // 只有噪声、没有任何响应 (画面在抖但不跟命令)
         {
@@ -550,7 +550,7 @@ int main() {
             CHECK(e.ticks >= CALIB_TRIGGER_TICKS
                   && cal_plan_worst_ms(CAL_MODE_HID) > cal_plan_span_ms(CAL_MODE_HID),
                   "整轮拍数含触发长按窗 (故历史上限含它), 打印的计划时长不含它");
-            CHECK(!cal_writeback(CAL_VAR_HID, e.r, path), "失败路径不写回");
+            CHECK(!cal_writeback(CAL_VAR_HID, e.r, e.r.l_est, path), "失败路径不写回");
         }
         // 尾迹被停顿截断: L 远超静止参考窗起点 → 失败而不是给一个偏小的数
         {
@@ -565,7 +565,7 @@ int main() {
         {
             const E2E e = run_e2e(CAL_MODE_PAD, {40, 1.5, 0, 0.03, 0, 1}, 120, 9u, false);
             CHECK(e.ok, "手柄模式 (单轴) 整轮成功");
-            CHECK(cal_writeback(CAL_VAR_PAD, e.r, path), "成功路径写回");
+            CHECK(cal_writeback(CAL_VAR_PAD, e.r, e.r.l_est, path), "成功路径写回");
             char want[128];
             snprintf(want,sizeof(want),"PAD_L_EST=\"${PAD_L_EST:-%.1f}\"\n",(double)e.r.l_est);
             const std::string all = slurp();
@@ -574,7 +574,18 @@ int main() {
             CHECK(all.find("HID_L_EST=\"${HID_L_EST:-60.0}\"") != std::string::npos
                   && all.find("P5G_L_EST=\"${P5G_L_EST:-60.0}\"") != std::string::npos,
                   "另两格延迟原值不变");
-            CHECK(cal_writeback(CAL_VAR_P5G, e.r, path)
+            // 回写的**值**由调用方给, 不是本引擎的 l_est: 完整环路延迟 = 物理 L + 推理段
+            //   均值, 那一腿由采集线程逐帧累计 (见 io/capture.cpp 的标定段), 引擎写它拿到
+            //   的那个数 —— 于是"脚本里那个数"与"运行态生效的那个数"必然是同一个
+            {
+                const float composed = e.r.l_est + 2.25f;
+                CHECK(cal_writeback(CAL_VAR_PAD, e.r, composed, path),
+                      "成功路径写回 (值由调用方给)");
+                snprintf(want,sizeof(want),"PAD_L_EST=\"${PAD_L_EST:-%.1f}\"\n",(double)composed);
+                CHECK(slurp().find(want) != std::string::npos,
+                      "落盘的是传入的环路延迟值 (物理 L + 推理段均值), 不是引擎的物理 L");
+            }
+            CHECK(cal_writeback(CAL_VAR_P5G, e.r, e.r.l_est, path)
                   && slurp().find("P5G_L_EST=\"${P5G_L_EST:-") != std::string::npos,
                   "第三种输出 (p5g) 写的是它自己那一格 (VAR 名由调用方三选一)");
         }

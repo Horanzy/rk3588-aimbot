@@ -298,6 +298,17 @@ void ai_thread(std::string model_path, int target_cls, int num_classes,
     std::vector<double> ages;               // 本窗口的帧龄 (帧时间戳 → 检测就绪, ms)
     auto fps_t0 = std::chrono::steady_clock::now();
 
+    // 推理段 (打包 + H2D + exec + D2H + 解码 — [AI FPS] 行报的那一段) 的逐帧累计: 标定的
+    //   三个读数量的都是**物理环路延迟**, 而标定整轮**跳过推理**, 于是这一腿不在它的测量
+    //   里; 回路里它确实在 (律看到的是解码后的框), 所以回写的环路延迟 = 物理 L + 这段均值。
+    //   **只累计走完整条链的帧** (标定期一帧都不计, 否则把"被跳过的腿"算进自己的均值), 帧
+    //   数随均值一起报出。取帧与 RGA 不做这个加法: 标定那轮照付这两腿 (它自己也要取帧、
+    //   也要裁一次 640 窗口), 只有推理是它真正跳过的一腿。
+    //   段成本是模型自己的属性 (输入边长与保留输出定了就不再变), 故整轮平均即可, 不按
+    //   源模式重置 (源模式变的是 RGA 的活, 不是这段)。
+    double inf_us_sum = 0.0;
+    long   inf_n = 0;
+
     // 取帧层自己的账: 每 60s 报的是**本窗口的增量** (累计值在"收帧统计:"里), 而"断流一次
     //   到底花了多少"只有这一处的四个量能回答 —— 等 fence 的次数与其中等到超时的次数,
     //   以及失锁/停在原地的判定次数与重建的成败次数 (口径与出处见 io/hdmi_in.h)。
@@ -416,6 +427,8 @@ void ai_thread(std::string model_path, int target_cls, int num_classes,
             sum_pack += tick.npu.pack_us; sum_h2d += tick.npu.h2d_us;
             sum_exec += tick.npu.exec_us; sum_d2h += tick.npu.d2h_us;
             sum_dec += tick.npu.decode_us;
+            inf_us_sum += tick.npu.total_us();      // 标定回写要加的那一腿 (见上面的说明)
+            ++inf_n;
             sum_wait += 1000.0 * (double)wait_ms;
             sum_fence += in.last_fence_wait_us();
             ages.push_back(elapsed_ms(std::chrono::steady_clock::now(),
@@ -436,7 +449,8 @@ void ai_thread(std::string model_path, int target_cls, int num_classes,
                        "%.2f 解码 %.2f) | 合计 %.2fms/帧 | 帧龄(帧时间戳→检测就绪) p50 %.1f "
                        "p99 %.1f max %.1fms | 等 fence %llu 次 (成功 %llu 次 均值 %.2fms) | "
                        "超时 %llu 次 (白等 %llu×%dms) | 失锁 %llu 次 停流 %llu 次 | 重建 "
-                       "%llu 成功 %llu 失败\n",
+                       "%llu 成功 %llu 失败 | 推理段累计均值 %.2fms (%ld 帧 — 标定回写要加的"
+                       "那一腿)\n",
                        (int)((double)fps_cnt / win_s), src_hz, win_s, sum_wait / n,
                        sum_fence / n, sum_rga / n, sum_npu / n, sum_pack / n, sum_h2d / n,
                        sum_exec / n, sum_d2h / n, sum_dec / n,
@@ -450,7 +464,8 @@ void ai_thread(std::string model_path, int target_cls, int num_classes,
                        (unsigned long long)(sc.lock_lost - src_prev.lock_lost),
                        (unsigned long long)(sc.stalled - src_prev.stalled),
                        (unsigned long long)(sc.rearm_ok - src_prev.rearm_ok),
-                       (unsigned long long)(sc.rearm_fail - src_prev.rearm_fail));
+                       (unsigned long long)(sc.rearm_fail - src_prev.rearm_fail),
+                       inf_n ? inf_us_sum / (double)inf_n / 1000.0 : 0.0, inf_n);
                 fflush(stdout);
                 fps_cnt = 0; sum_rga = sum_npu = sum_pack = sum_h2d = sum_exec = sum_d2h
                     = sum_dec = sum_wait = sum_fence = 0;
@@ -527,13 +542,32 @@ void ai_thread(std::string model_path, int target_cls, int num_classes,
                 fflush(stdout);
             }
             if (done == 1) {
+                // 回写的环路延迟 = 物理 L + 推理段均值 (口径见 inf_us_sum 的说明与
+                //   io/calib_run.h 的回写段)。**运行态同步取这一个值**: 律要补偿的是完整
+                //   回路, 而标定量的物理那一半缺了推理这一腿。冷启动 (本次运行还没有跑过
+                //   一帧推理) 时没有均值可加: 只写物理值并把这件事说出来 —— 绝不补一个
+                //   编造的推理耗时, 也绝不留一个没说清的差。
+                const double inf_ms = inf_n ? inf_us_sum / (double)inf_n / 1000.0 : 0.0;
+                const float  l_write = (float)((double)cr.l_est + inf_ms);
+                // 行内同样写 L=: 面板的延迟卡片取的就是这条 (它显示"在用的那一格"),
+                //   而回写与运行态生效的是同一个数 —— 卡片、脚本、律三处一致
+                if (inf_n)
+                    printf("[标定] L=%.1f ms (完整环路延迟 = 物理 %.1fms + 推理段均值 %.2fms/"
+                           "%ld 帧; 推理段是标定整轮跳过的那一腿, 取帧与 RGA 两腿已量在物理值里)\n",
+                           (double)l_write, (double)cr.l_est, inf_ms, inf_n);
+                else
+                    printf("[标定] L=%.1f ms (完整环路延迟 = 物理 %.1fms; 本次运行还没跑过推理帧, "
+                           "无推理段均值 — 只写物理值)\n", (double)l_write, (double)cr.l_est);
                 if (!persist_path.empty()) {
                     // 回写 VAR 名由输出模式在 main 里选好 (三套输出各一格延迟)
-                    if (cal_writeback(cal_var, cr, persist_path))
-                        std::cout << "[标定] 已回写 " << persist_path << " (" << cal_var << ")\n";
+                    if (cal_writeback(cal_var, cr, l_write, persist_path))
+                        std::cout << "[标定] 已回写 " << persist_path << " (" << cal_var << " = "
+                                  << l_write << "ms)\n";
                     else std::cerr << "[标定] 回写失败\n";
+                } else {
+                    std::cout << "[标定] 未给 -S: 不回写 (运行态已按 " << l_write << "ms 生效)\n";
                 }
-                l_est = cr.l_est;      // 只标延迟: 唯一进运行态的标定量
+                l_est = l_write;       // 只标延迟: 唯一进运行态的标定量
             } else
                 std::cout << "[标定] 失败, 未回写 (无编造的值)\n";
             g_calib_done = done;

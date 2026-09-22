@@ -231,6 +231,8 @@ def main():
         # 成功: 只写本模式那一格, 且守卫写法原样保住 (值落在 ${...:-默认} 的默认位上)
         ok((l_var + '="${' + l_var + ":-") in after,
            "成功路径: 只回写本输出模式的延迟 VAR, 守卫写法保留 (%s)" % l_var)
+        ok("完整环路延迟 = 物理" in text,
+           "成功路径: 轮次日志给出物理 L + 推理段均值 + 写回的总环路延迟 (回写值 = 两者之和)")
         others = [v for v in ("HID_L_EST", "PAD_L_EST", "P5G_L_EST") if v != l_var]
         ok(all((v + '="${' + v + ":-60.0}\"") in after for v in others),
            "另两套输出的延迟槽逐字未动")

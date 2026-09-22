@@ -507,17 +507,20 @@ void cal_print_diag(CalMode mode, const CalResult& r, size_t hist_n) {
                (r.l_axis_n[0] && r.l_axis_n[1]) ? "" : " (只一轴出读数)");
     if (r.err[0]) printf("[标定] 无法测量: %s (样本 %zu)\n", r.err, hist_n);
     else if (r.used_edges)
-        printf("[标定] L=%.1f ms (尾迹族不可用, 取停止沿族中位) — 只标延迟; 速度不回写 "
-               "(手感走 spdx/spdy)\n", (double)r.l_est);
+        printf("[标定] L=%.1f ms (物理环路延迟: 尾迹族不可用, 取停止沿族中位) — 只标延迟; "
+               "速度不回写 (手感走 spdx/spdy); 完整环路延迟 = 本值 + 推理段均值 (采集侧紧随其后"
+               "报出)\n", (double)r.l_est);
     else
-        printf("[标定] L=%.1f ms (尾迹族中位; 三读数见上) — 只标延迟; 速度不回写 "
-               "(手感走 spdx/spdy)\n", (double)r.l_est);
+        printf("[标定] L=%.1f ms (物理环路延迟: 尾迹族中位; 三读数见上) — 只标延迟; 速度不回写 "
+               "(手感走 spdx/spdy); 完整环路延迟 = 本值 + 推理段均值 (采集侧紧随其后报出)\n",
+               (double)r.l_est);
     fflush(stdout);
 }
 
-bool cal_writeback(const char* var, const CalResult& r, const std::string& persist_path) {
+bool cal_writeback(const char* var, const CalResult& r, float l_written,
+                   const std::string& persist_path) {
     if (!r.ok || persist_path.empty()) return false;
-    return persist_calibration(persist_path, var, r.l_est);
+    return persist_calibration(persist_path, var, l_written);
 }
 
 // ========================= 状态机 =========================
