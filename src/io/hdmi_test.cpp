@@ -65,12 +65,11 @@ int main() {
         std::cout << "[3] 重建节拍\n";
         const auto t0 = std::chrono::steady_clock::now();
         const auto at = [&](int ms) { return t0 + std::chrono::milliseconds(ms); };
-        CHECK(!hdmi_rearm_due(at(0), at(0)), "同一时刻不重复尝试");
-        CHECK(!hdmi_rearm_due(at(HDMI_REARM_MIN_MS - 1), at(0)),
-              "差 1ms 还不到节拍, 不再试");
-        CHECK(hdmi_rearm_due(at(HDMI_REARM_MIN_MS), at(0)), "刚好到节拍即试");
-        CHECK(hdmi_rearm_due(at(HDMI_REARM_MIN_MS + 1), at(0)), "超过节拍即试");
-        CHECK(hdmi_rearm_due(at(10 * HDMI_REARM_MIN_MS), at(0)), "久未尝试时立即试 (首次打开)");
+        CHECK(!hdmi_rearm_due(t0, t0), "同一时刻不重复尝试");
+        CHECK(!hdmi_rearm_due(t0, at(HDMI_REARM_MIN_MS - 1)), "差 1ms 还不到节拍, 不再试");
+        CHECK(hdmi_rearm_due(t0, at(HDMI_REARM_MIN_MS)), "刚好到节拍即试");
+        CHECK(hdmi_rearm_due(t0, at(HDMI_REARM_MIN_MS + 1)), "超过节拍即试");
+        CHECK(hdmi_rearm_due(t0, at(10 * HDMI_REARM_MIN_MS)), "久未尝试时立即试 (首次打开)");
     }
 
     // ---------------- [4] 常量的推导关系 ----------------
