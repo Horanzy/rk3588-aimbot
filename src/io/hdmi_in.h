@@ -225,6 +225,10 @@ public:
     //   与 userspace 侧开销分开报 (两者合起来才是"拿到手时这帧有多旧")
     double   last_fence_wait_us() const { return last_fence_wait_us_; }
 
+    // 锁定时序导出的帧率 (Hz) = 像素时钟 / (总宽 × 总高): 帧率是**信号的属性**,
+    //   由接收器报的时序给出 (有效区尺寸乘像素时钟得到的是像素率, 不是帧率);
+    //   未锁定/时序缺失时返回 0。控制拍与标定采样窗按它取本源的帧长尺度。
+    double frame_hz() const;
     // 'BGR3' 这样的四字符码文字 (日志与探针用)
     static std::string fourcc_name(uint32_t f);
     // 锁定时序的一行文字: 有效尺寸 / 总尺寸 / 像素时钟 / 导出帧率

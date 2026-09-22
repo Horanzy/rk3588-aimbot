@@ -16,9 +16,10 @@
 #        制造屏幕运动, 故**期望失败**且脚本里的 VAR 逐字未动 (屏幕静止/无响应是最常见
 #        的现场), 这本身就是一条验收: 绝不写编造的值。
 #
-#  跑法 (仓库根, 需要 uinput/evdev 权限, sudo 运行; 采集卡与模型按需给出):
+#  跑法 (仓库根, 需要 uinput/evdev 权限, sudo 运行; 采集设备与模型按需给出):
 #    sudo python3 scripts/test/uinput_calib_test.py --mode hid|pad|p5g \
-#        [--aimbot bin/aimbot] [--model engine/apex.engine] [--cam /dev/video0] [--fps 120]
+#        [--aimbot bin/aimbot] [--model engine/apex.axmodel] [--cam /dev/video0] \
+#        [--classes 0]
 #  全过输出 ALL PASS 返回 0。
 # ============================================================================
 import argparse
@@ -127,9 +128,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--mode", default="hid", choices=("hid", "pad", "p5g"))
     ap.add_argument("--aimbot", default=os.path.join(ROOT, "bin", "aimbot"))
-    ap.add_argument("--model", default=os.path.join(ROOT, "engine", "apex.engine"))
+    ap.add_argument("--model", default=os.path.join(ROOT, "engine", "yolo11s.axmodel"))
+    ap.add_argument("--classes", default="0", help="模型类数 (未折叠 DFL 头必须给; 公开 YOLO11 = 80)")
     ap.add_argument("--cam", default="/dev/video0")
-    ap.add_argument("--fps", default="120", choices=("120", "60"))
     args = ap.parse_args()
 
     work = tempfile.mkdtemp(prefix="calibtest-")
@@ -159,8 +160,8 @@ def main():
     print("虚拟设备: %s" % dev.node)
     print("回写 VAR: %s (模式 %s)" % (l_var, args.mode))
 
-    cmd = ["sudo", "-n", args.aimbot, "-m", args.model, "-c", "0", "-t", "0.5", "-y", "65",
-           "-d", args.cam, "-f", args.fps, "-x", "2000", "-l", "60",
+    cmd = ["sudo", "-n", args.aimbot, "-m", args.model, "-c", "0", "-n", args.classes,
+           "-t", "0.5", "-y", "65", "-d", args.cam, "-x", "2000", "-l", "60",
            "-S", script, "-k", "fire", "-a", "y"] + dev_args
     log = open(logp, "w")
     p = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, cwd=ROOT)

@@ -1,9 +1,13 @@
 // ============================================================================
 //  aimbot — AI 视觉自瞄 (鼠标透传式) + 可选训练数据采集
 //
-//  链路: 采集卡 (UVC 1080p NV12, -d 按名字选择) → GStreamer nvvidconv
-//        → CUDA 预处理 → TensorRT YOLO 检测 → alpha-beta 目标跟踪
-//        → 控制律 (极点配置 PI + type-2 速度前馈) → USB raw_gadget 鼠标透传
+//  链路: 板载 HDMI RX (2560×1440@120 BGR3, -d 选节点或按驱动名解析) → RGA 中心 1:1
+//        裁剪/换格式 → AXCL NPU 推理 (YOLO) → alpha-beta 目标跟踪 → 控制律
+//        (极点配置 PI + type-2 速度前馈) → USB raw_gadget 鼠标/手柄透传
+//
+//  **帧率不是可给的选择**: 采集率由信号与接收器的定时序决定, 唯一可测的是检测率
+//    ([AI FPS] 行 = 走完整条链的帧/s)。取帧层把锁定帧率写进 io/capture.h 的 src_fps(),
+//    控制拍 (律的帧长尺度) 与标定采样窗都读它, 故没有帧率开关。
 //
 //  控制律: 收敛带宽 wn 由标定延迟 L 自动导出 (wn=(90°−PM)π/180/L, PM=50°, 免手调),
 //    ζ=1 临界阻尼; type-2 速度前馈 (FF_GAIN_VAL=1) 补匀速跟踪零拖尾; 创新均值反演 â
@@ -12,7 +16,8 @@
 //    与 AGENTS.md。
 //
 //  采集 (可选): 传 -o 输出目录即开启, 按三源触发自动截图 (开火 / 检测 / 定时),
-//    截图 = 模型输入同款中心裁剪, 按来源分子目录, 异步写盘不阻塞推理。不传 -o 则纯自瞄。
+//    截图 = 规范窗口 (640 BGR 居中 1:1 裁剪, 与模型输入同域), 按来源分子目录, 异步
+//    写盘不阻塞推理。不传 -o 则纯自瞄。
 //    三源各有独立开关 (-e, 热参 cap_fire/cap_det/cap_auto), 间隔参数见 -F/-A/-C。
 //
 //  鼠标接管: -a n (或热参 aim=0) 时固件纯透传真实鼠标 — 不注入任何移动, 检测/采集照常。
@@ -46,12 +51,16 @@
 //
 //  本文件为程序入口: 参数解析, 设备打开, 线程孵化与 timerfd 控制主循环 (拍率 =
 //    DEFAULT_FREQ, core/state.h); 其余按归属分模块 — core/ (共享状态/控制律/
-//    估计器/标定/TRT 辅助), io/ (采集/鼠标输入与 USB 输出/热参)。
+//    估计器/标定/检测解析), io/ (采集与推理/鼠标输入与 USB 输出/热参)。
+//
+//  收尾用 _Exit 跳过静态析构: axcl 的库在静态析构里 abort (实测 RC=134, 输出已打印完
+//    之后), 否则一次正常退出会变成非 0 退出码, 还可能吃掉尾部输出。
 // ============================================================================
 
 #include <algorithm>
 #include <array>
 #include <cerrno>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <fstream>
@@ -71,6 +80,7 @@
 #include "core/state.h"
 #include "io/calib_run.h"
 #include "io/capture.h"
+#include "io/hdmi_in.h"
 #include "io/hid_mouse.h"
 #include "io/hotctl.h"
 #include "io/pad_input.h"
@@ -92,7 +102,7 @@ int main(int argc, char* argv[]) {
              <<"  AI 视觉自瞄 (ff_pi_acc 控制律)\n"
              <<"========================================\n";
 
-    std::string a_m,a_c,a_t,a_y,a_d,a_f,a_x,a_l,a_S,a_k,a_v,a_r,a_D;
+    std::string a_m,a_c,a_t,a_y,a_d,a_n,a_x,a_l,a_S,a_k,a_v,a_r,a_D;
     std::string a_o,a_a,a_e,a_spd,a_adsspd; bool have_e=false;
     std::string a_M,a_P,a_T; bool pad_dump=false;
     int fire_ms=300; double auto_s=10;
@@ -102,10 +112,10 @@ int main(int argc, char* argv[]) {
         std::string arg=argv[i];
         if      (arg=="-m"&&i+1<argc) a_m=argv[++i];
         else if (arg=="-c"&&i+1<argc) a_c=argv[++i];
+        else if (arg=="-n"&&i+1<argc) a_n=argv[++i];
         else if (arg=="-t"&&i+1<argc) a_t=argv[++i];
         else if (arg=="-y"&&i+1<argc) a_y=argv[++i];
         else if (arg=="-d"&&i+1<argc) a_d=argv[++i];
-        else if (arg=="-f"&&i+1<argc) a_f=argv[++i];
         else if (arg=="-x"&&i+1<argc) a_x=argv[++i];
         else if (arg=="-l"&&i+1<argc) a_l=argv[++i];
         else if (arg=="-S"&&i+1<argc) a_S=argv[++i];
@@ -129,9 +139,10 @@ int main(int argc, char* argv[]) {
         else if (arg=="-h"||arg=="--help") {
             std::cout<<"用法: "<<argv[0]<<" [自瞄选项] [采集选项]\n"
                 "\n自瞄选项:\n"
-                "  -m <路径>  模型       -c <ID>   类别      -t <阈值> 置信度\n"
-                "  -y <偏移>  部位       -d <采集卡> 名字或 /dev/videoN\n"
-                "  -f <帧率>  120/60     -x <速度> 最大px/s\n"
+                "  -m <路径>  模型 (.axmodel)  -c <ID> 类别  -n <数> 模型类数\n"
+                "  -t <阈值>  置信度     -y <偏移> 部位\n"
+                "  -d <节点>  采集设备: /dev/videoN (缺省 = 按驱动名解析接收器节点)\n"
+                "  -x <速度>  最大px/s\n"
                 "  -l <L>     初始延迟\n"
                 "  -S <脚本>  回写路径 (标定只写本输出模式的延迟 VAR:\n"
                 "             hid → HID_L_EST, pad → PAD_L_EST, p5g → P5G_L_EST)\n"
@@ -140,6 +151,11 @@ int main(int argc, char* argv[]) {
                 "  --ads-spd <x>[,<y>]  ADS 键按住时的同一对 (默认 100; 热参 adsspdx/adsspdy)\n"
                 "  -r <半径>  FOV 半径 px (默认 150, 10–1000)\n"
                 "  -a <y/n>   鼠标接管 (默认 y; n=纯透传: 不注入, 检测/采集照常)\n"
+                "\n参数说明:\n"
+                "  -n 只在模型的检测头是**未折叠 DFL 头**时需要 (公开 YOLO11 是 80 类):\n"
+                "     该头的属性数 = 4·reg_max + 类数, 而 reg_max 不是可观测量, 故不猜;\n"
+                "     网格头的类数由属性数自解, 给 0 即可。缺它时该模型的 DFL 输出不解码。\n"
+                "  帧率不在参数面上: 采集率由信号决定, 检测率由 [AI FPS] 行报出。\n"
                 "\n输出模式 (互斥, 缺省 hid):\n"
                 "  -M <模式>  hid=USB raw_gadget 鼠标 (游戏内鼠标灵敏度生效)\n"
                 "             pad=XInput 手柄输出: 物理手柄全透传 + 控制律注入右摇杆,\n"
@@ -174,13 +190,15 @@ int main(int argc, char* argv[]) {
              if (std::ifstream(model_path).good()) break; std::cerr<<"文件不存在\n"; } }
 
     int   cls     =std::stoi(!a_c.empty()?a_c:get_input_with_default("类别ID","0"));
+    // 类数只在未折叠 DFL 头上需要 (attrs = 4·reg_max + 类数, reg_max 不可观测);
+    //   网格头的类数由属性数自解, 缺省 0 = 自解 (见 io/capture.h 的 open)
+    int   ncls    =std::stoi(!a_n.empty()?a_n:get_input_with_default("模型类数(0=自解)","0"));
+    ncls=std::max(0,ncls);
     // 交互默认与启动模板/文档同值 (置信度 0.5; 速度上限 2000 = scripts/game/
     //   template.sh.example 里 MAX_SPEED 的成文推导的落点) — 只交互式跑固件的人与经
     //   webui/模板启动的人落在同一个工作点上。
     float conf    =std::stof(!a_t.empty()?a_t:get_input_with_default("置信度","0.5"));
     float y_off   =std::stof(!a_y.empty()?a_y:get_input_with_default("Y偏移","65"));
-    int   cam_fps =std::stoi(!a_f.empty()?a_f:get_input_with_default("帧率","120"));
-    cam_fps=std::clamp(cam_fps,1,240);
     float max_spd =std::stof(!a_x.empty()?a_x:get_input_with_default("最大速度","2000"));
     max_spd=std::clamp(max_spd,100.0f,20000.0f);
     const float max_v=max_spd/1000.0f;
@@ -273,11 +291,22 @@ int main(int argc, char* argv[]) {
     if (do_collect) { ensure_dir(a_o); ensure_dir(a_o+"/fire");
                       ensure_dir(a_o+"/det"); ensure_dir(a_o+"/auto"); }
 
-    std::string cam_dev=resolve_cam_device(a_d.empty()?"/dev/video0":a_d);
-    if (cam_dev.empty()) return 1;
+    // 采集设备: 本平台只有一个内建接收器 (板载 HDMI RX), 故 -d 只认 /dev/videoN
+    //   路径 —— 缺省按**驱动名**解析 (下标跨重启不稳, 见 io/hdmi_in.h); 采集卡名字
+    //   在这里没有对应物 (没有 UVC 采集卡, 也没有 /dev/v4l/by-id 节点), 非路径的取值
+    //   按忽略处理并说明, 免得"看起来设了其实没设"。
+    std::string cam_spec=a_d;
+    if (!cam_spec.empty() && cam_spec.rfind("/dev/",0)!=0) {
+        std::cerr<<"⚠ 忽略 -d \""<<cam_spec<<"\" (本平台 -d 是采集设备节点: /dev/videoN; "
+                   "缺省按驱动名解析接收器)\n";
+        cam_spec.clear();
+    }
+    std::string cam_dev_err;
+    std::string cam_dev=HdmiIn::resolve_device(cam_spec,&cam_dev_err);
+    if (cam_dev.empty()) { std::cerr<<"❌ 采集设备: "<<cam_dev_err<<"\n"; return 1; }
     if (access(cam_dev.c_str(),F_OK)!=0) {
-        std::cerr<<"❌ 采集卡设备不存在: "<<cam_dev<<"\n"; return 1; }
-    std::cout<<"✅ 采集卡: "<<cam_dev<<"\n";
+        std::cerr<<"❌ 采集设备不存在: "<<cam_dev<<"\n"; return 1; }
+    std::cout<<"✅ 采集设备: "<<cam_dev<<"\n";
 
     MouseState state;
     UsbRawSession usb;
@@ -332,7 +361,7 @@ int main(int argc, char* argv[]) {
 
     std::thread writer; if (do_collect) writer=std::thread(writer_thread,jpeg_q);
     std::thread hot(hotctl_thread);
-    std::thread ai(ai_thread,model_path,cls,cam_dev,cam_fps,preview,
+    std::thread ai(ai_thread,model_path,cls,ncls,cam_dev,preview,
                    init_l,persist_path,cal_var,
                    pad_mode?CAL_MODE_PAD:CAL_MODE_HID,
                    a_o,fire_ms,auto_s,cooldown_ms,jpeg_q);
@@ -351,15 +380,18 @@ int main(int argc, char* argv[]) {
         int nf=epoll_wait(ep,evs,1,500);
         if(nf<0&&errno==EINTR)continue; if(nf<=0)continue;
         uint64_t exp; read(tfd,&exp,sizeof(exp));
+        // 律的帧长尺度取信号自己的帧率 (取帧层写进 src_fps): 每拍现读, 于是接收器
+        //   报出定时序的那一刻起就生效, 不需要谁去通知控制拍
+        const int src_hz_i=std::max(1,(int)std::lround(src_fps()));
         if (pad_mode) {
-            pad_tick(cam_fps,padst,pad_dump);   // 手柄拍: 快照 → 触发 → 律 → 合并 → 发布
+            pad_tick(src_hz_i,padst,pad_dump);  // 手柄拍: 快照 → 触发 → 律 → 合并 → 发布
             continue;
         }
         int16_t x,y;int8_t w,hw;uint16_t b;
         extract_and_clear(state,x,y,w,hw,b);
-        hid_report_submit(usb,x,y,w,hw,b,[cam_fps](std::array<uint8_t,HID_REPORT_LEN>& rpt,
-                                                   int16_t rx, int16_t ry) {
-            control_apply(cam_fps,rpt.data(),rx,ry); });
+        hid_report_submit(usb,x,y,w,hw,b,[src_hz_i](std::array<uint8_t,HID_REPORT_LEN>& rpt,
+                                                    int16_t rx, int16_t ry) {
+            control_apply(src_hz_i,rpt.data(),rx,ry); });
     }
 
     global_running=false;
@@ -373,5 +405,8 @@ int main(int argc, char* argv[]) {
     if (do_collect) writer.join();
     close(tfd);close(ep);
     std::cout<<"已停止\n";
-    return 0;
+    std::cout.flush();
+    // _Exit: 跳过静态析构 —— axcl 的库在静态析构里 abort (实测 RC=134), exit() 会把
+    //   一次正常退出变成非 0 退出码, 还可能吃掉尾部输出
+    std::_Exit(0);
 }

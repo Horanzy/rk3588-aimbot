@@ -24,10 +24,10 @@ OCV="-lopencv_core -lopencv_videoio -lopencv_highgui -lopencv_imgproc -lopencv_v
 LIBS="-L/usr/lib/axcl -laxcl_rt -laxcl_pkg -lrga"
 PTHREAD="-pthread"
 
-# 模块清单 = src/ 下的全部可移植编译单元 (core/io 各 .cpp 逐一对应)
-MODULES="core/control core/estimator core/calib core/detect core/state \
+# 模块清单 = src/ 下的全部可移植编译单元 (入口 main 与 core/io 各 .cpp 逐一对应)
+MODULES="main core/control core/estimator core/calib core/detect core/state \
          io/hid_mouse io/usbraw io/hotctl io/calib_run io/pad_input io/pad_output \
-         io/pad_xinput io/pad_p5g io/hdmi_in io/rga_pp io/npu_axcl"
+         io/pad_xinput io/pad_p5g io/hdmi_in io/rga_pp io/npu_axcl io/capture"
 
 OBJS=""
 for m in $MODULES; do
@@ -40,6 +40,11 @@ done
 # 单测统一链接除 main.o 外的全部模块对象 (与正式产物同一份目标码), 逐个执行;
 #   断言失败 (退出码非 0) 时 set -e 终止整个编译。
 TEST_OBJS=$(printf '%s\n' $OBJS | grep -v "build/main.o" | tr '\n' ' ')
+
+# 正式产物: 入口 main.o + 全部模块对象 → bin/aimbot (它需要 root: /dev/axcl_host、
+#   /dev/rga、raw_gadget 都是 root-only)
+# shellcheck disable=SC2086
+$CXX "$BUILD/main.o" $TEST_OBJS $LIBS $OCV $PTHREAD -o "$BIN/aimbot"
 
 # 控制拍单测 (拉枪速度倍率 spd 的落点): spd=100 即基线 (1 count = 1 px), 逐轴独立,
 #   ADS 键按住那一拍整套切换 + g_ads_down 导出, 注入换算/在飞补偿/估计器自身运动
@@ -94,4 +99,13 @@ $CXX -c "$ROOT/scripts/test/model_probe.cpp" $CXX_FLAGS $INCLUDES -o "$BUILD/mod
 # shellcheck disable=SC2086
 $CXX "$BUILD/model_probe.o" $TEST_OBJS $LIBS $OCV $PTHREAD -o "$BUILD/model_probe"
 
-echo "✅ 编译完成 (可移植集 + 四个单测 + 采集探针 + NPU 探针) → $BUILD"
+# 取帧→NPU 端到端探针 (板端验收工具, 不是单测): 用生产路径本身 (io/capture 的
+#   CapturePipeline) 跑活信号帧率/逐段耗时, 再把一张真图贴进一帧真实采集缓冲的中心窗口
+#   走同一条链并落盘窗口与标注 PNG。要 root、卡与活动信号, 故只构建不执行 ——
+#   运行: sudo LD_LIBRARY_PATH=/usr/lib/axcl ./build/pipeline_probe <model> --image <jpg>
+# shellcheck disable=SC2086
+$CXX -c "$ROOT/scripts/test/pipeline_probe.cpp" $CXX_FLAGS $INCLUDES -o "$BUILD/pipeline_probe.o"
+# shellcheck disable=SC2086
+$CXX "$BUILD/pipeline_probe.o" $TEST_OBJS $LIBS $OCV $PTHREAD -o "$BUILD/pipeline_probe"
+
+echo "✅ 编译完成 (bin/aimbot + 可移植集 + 四个单测 + 采集探针 + NPU 探针 + 端到端探针) → $BUILD"

@@ -1,9 +1,8 @@
 // ============================================================================
 //  calib.cpp — calib.h 的实现: 一维投影相位相关 (calib_pc1d), 单帧块统计
 //    (calib_axis_stats — 静止簇剔除 + 中位 + 两个质量量), 逐帧采样器 (CalibSampler),
-//    标定值脚本原子回写 (persist_calibration), /dev/v4l/by-id 采集卡名解析
-//    (resolve_cam_device)。纯 C++/OpenCV, 不含相机与模型依赖 — 单测直接喂合成块与
-//    合成图 (方案对照与几何不变量都在 core/calib_test.cpp)。
+//    标定值脚本原子回写 (persist_calibration)。纯 C++/OpenCV, 不含相机与模型依赖 —
+//    单测直接喂合成块与合成图 (方案对照与几何不变量都在 core/calib_test.cpp)。
 // ============================================================================
 
 #include "core/calib.h"
@@ -204,36 +203,4 @@ bool persist_calibration(const std::string& path, const std::string& var, float 
     if (have) { chmod(tmp.c_str(),st.st_mode); chown(tmp.c_str(),st.st_uid,st.st_gid); }
     if (rename(tmp.c_str(),path.c_str())!=0) { unlink(tmp.c_str()); return false; }
     return true;
-}
-
-std::string resolve_cam_device(const std::string& spec) {
-    if (spec.rfind("/dev/",0)==0) return spec;
-    std::string key=spec;
-    std::transform(key.begin(),key.end(),key.begin(),
-                   [](unsigned char c){ return std::tolower(c); });
-    std::vector<std::string> avail,hits;
-    if (DIR* dp=opendir("/dev/v4l/by-id")) {
-        while (dirent* e=readdir(dp)) {
-            std::string nm=e->d_name;
-            const std::string suf="-video-index0";
-            if (nm.size()<=suf.size()
-                || nm.compare(nm.size()-suf.size(),suf.size(),suf)!=0) continue;
-            avail.push_back(nm);
-            std::string low=nm;
-            std::transform(low.begin(),low.end(),low.begin(),
-                           [](unsigned char c){ return std::tolower(c); });
-            if (low.find(key)!=std::string::npos) hits.push_back(nm);
-        }
-        closedir(dp);
-    }
-    if (hits.size()!=1) {
-        std::cerr<<"❌ 采集卡 \""<<spec<<"\" "
-                 <<(hits.empty()?"没有匹配":"匹配到多个")<<", 可选:\n";
-        for (auto& a:avail) std::cerr<<"   "<<a<<"\n";
-        return "";
-    }
-    std::string link="/dev/v4l/by-id/"+hits[0];
-    char resolved[PATH_MAX];
-    if (realpath(link.c_str(),resolved)) return resolved;
-    return link;
 }

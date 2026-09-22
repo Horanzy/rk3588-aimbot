@@ -1,8 +1,9 @@
 // ============================================================================
 //  calib.h — 标定的采样底座 (与 AI 检测无关): 采样几何 (640 居中裁切 → 320 半分辨率
 //    相关域 → 3×3 块), 单轴一维投影相位相关 (calib_pc1d), 单帧块统计 (静止簇剔除 +
-//    中位), 标定值的脚本原子回写 (persist_calibration), 采集卡设备名解析
-//    (resolve_cam_device)。测量方法 (停顿 + 三读数) 与激励计划在 io/calib_run.h。
+//    中位), 标定值的脚本原子回写 (persist_calibration)。测量方法 (停顿 + 三读数) 与
+//    激励计划在 io/calib_run.h; 采集设备的解析在取帧层 (io/hdmi_in.h 的
+//    resolve_device —— 按驱动名解析, 本平台只有一个内建接收器)。
 //
 //  采样几何 (与模型输入尺寸解耦; 推理链路的裁剪逐位不变):
 //    标定固定取采集帧的 640×640 居中裁剪, 灰度后 INTER_AREA 降到 320×320 的
@@ -178,4 +179,3 @@ struct CalibSample {
 //   脚本可能同时被另一写者改写 (webui 保存用它自己的临时文件), 共用一个 ".tmp" 会让
 //   两份内容在重命名前互相穿插。
 bool persist_calibration(const std::string& path, const std::string& var, float l);
-std::string resolve_cam_device(const std::string& spec);

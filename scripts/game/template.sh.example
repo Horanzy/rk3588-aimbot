@@ -33,7 +33,7 @@
 # ---- 路径 ----
 ROOT="$(cd "$(dirname "$(realpath "$0")")/../.." && pwd)"
 APP="$ROOT/bin/aimbot"
-MODEL_PATH="${MODEL_PATH:-$ROOT/engine/example.engine}"  # ← 改成 engine/ 下你实际转好的模型
+MODEL_PATH="${MODEL_PATH:-$ROOT/engine/example.axmodel}"  # ← 改成 engine/ 下你实际转好的模型
 
 # ---- 输出模式 ----
 # 三个模式互斥, 各自独占 UDC; 一次运行只居其一 (hid 读鼠标, 手柄模式读手柄)。
@@ -58,11 +58,14 @@ PAD_DUMP="${PAD_DUMP:-n}"           # pad/p5g: y = 每 ≥50ms 打一行合并�
                                     #       — 现场诊断注入用 (看命令波形, 不影响行为)
 
 # ---- 自瞄参数 ----
-CLASS_ID="${CLASS_ID:-0}"           # 目标类别 (依模型标签: 0=头 1=身)
+CLASS_ID="${CLASS_ID:-0}"           # 目标类别 (依模型标签: 0=人 17=马 …; -1 = 不筛类别)
+CLASS_N="${CLASS_N:-0}"             # 模型类数: 0 = 由属性数自解 (网格头); **未折叠 DFL 头
+                                    #   必须给** (公开 YOLO11 = 80) —— 该头的属性数 =
+                                    #   4·reg_max + 类数, 而 reg_max 不是可观测量, 不猜
 CONF_THRESH="${CONF_THRESH:-0.5}"   # 置信度阈值
 Y_OFFSET="${Y_OFFSET:-65}"          # 瞄准高度 (0=脚 50=中心 65=胸颈 100=头)
-CAM_DEV="${CAM_DEV:-Hagibis}"       # 采集卡: Hagibis / Asus (或 /dev/videoN)
-CAM_FPS="${CAM_FPS:-120}"           # 采集帧率: 120 / 60
+CAM_DEV="${CAM_DEV:-}"              # 采集设备: /dev/videoN (空 = 按驱动名解析板载 HDMI RX)
+                                    #   帧率不在参数面上: 采集率由信号决定, 检测率见 [AI FPS] 行
 MAX_SPEED="${MAX_SPEED:-2000}"      # 准星速度上限 px/s (= 屏幕速度上限 px/ms × 1000)
                                     # 取值依据: 屏幕速度 = 960·v_world/d_min (f≈960px@1080p/90°hFOV),
                                     # 准星必须至少赶上目标的屏幕速度, 否则饱和追赶、误差无界增长。
@@ -165,12 +168,12 @@ if [ "${CAPTURE:-n}" = "y" ]; then
 fi
 
 sudo "$APP" \
-  -m "${MODEL_PATH:-$ROOT/engine/example.engine}" \
+  -m "${MODEL_PATH:-$ROOT/engine/example.axmodel}" \
   -c "${CLASS_ID:-0}" \
+  -n "${CLASS_N:-0}" \
   -t "${CONF_THRESH:-0.5}" \
   -y "${Y_OFFSET:-65}" \
-  -d "${CAM_DEV:-Hagibis}" \
-  -f "${CAM_FPS:-120}" \
+  -d "${CAM_DEV:-}" \
   -x "${MAX_SPEED:-2000}" \
   -l "${L_V:-60.0}" \
   -S "$SCRIPT_PATH" \

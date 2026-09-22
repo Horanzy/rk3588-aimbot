@@ -73,15 +73,19 @@ std::string HdmiIn::fourcc_name(uint32_t f) {
 
 std::string HdmiIn::timing_text() const {
     char b[256];
+    const uint32_t tw = timing_.width + timing_.hfrontporch + timing_.hsync + timing_.hbackporch;
+    const uint32_t th = timing_.height + timing_.vfrontporch + timing_.vsync + timing_.vbackporch;
+    std::snprintf(b, sizeof(b), "%ux%u @ %.2fHz (总 %ux%u, 像素时钟 %llu Hz)", timing_.width,
+                  timing_.height, frame_hz(), tw, th, (unsigned long long)timing_.pixelclock);
+    return std::string(b);
+}
+
+double HdmiIn::frame_hz() const {
     // 帧率由**总**尺寸导出 (含消隐): 有效区尺寸 × 像素时钟 得到的是像素率, 不是帧率
     const uint32_t tw = timing_.width + timing_.hfrontporch + timing_.hsync + timing_.hbackporch;
     const uint32_t th = timing_.height + timing_.vfrontporch + timing_.vsync + timing_.vbackporch;
-    const double fps = (timing_.pixelclock > 0 && tw > 0 && th > 0)
-                           ? (double)timing_.pixelclock / ((double)tw * (double)th)
-                           : 0.0;
-    std::snprintf(b, sizeof(b), "%ux%u @ %.2fHz (总 %ux%u, 像素时钟 %llu Hz)", timing_.width,
-                  timing_.height, fps, tw, th, (unsigned long long)timing_.pixelclock);
-    return std::string(b);
+    if (timing_.pixelclock == 0 || tw == 0 || th == 0) return 0.0;
+    return (double)timing_.pixelclock / ((double)tw * (double)th);
 }
 
 // ============================== 设备解析 ==============================
@@ -522,8 +526,18 @@ bool HdmiIn::wait_frame(HdmiFrame* out, std::string* err) {    if (out == nullpt
         last_seq_ = newest.sequence;
 
         // 载荷写完的凭据 = fence (见 io/hdmi_in.h): 等不到就不交出去 —— 半张画面进了下游
-        //   比这里报错糟得多 (标定会把"还在写的那几行"当成真实位移)
-        if (!wait_fence(newest.fence_fd, err)) return false;
+        //   比这里报错糟得多 (标定会把"还在写的那几行"当成真实位移)。
+        //   **但缓冲必须当场归还**: 驱动的丢帧路径 (line_flag 中断里找不到下一个缓冲就
+        //   drop the frame!, 不重发旧帧) 会给该缓冲留下一个永不再 signal 的 fence, 于是
+        //   慢消费者跑长一点就必然遇到它; 不归还是永久少一块 —— 4 块里漏 3 块之后驱动就
+        //   再没有缓冲可写 (它自己要求 ≥2 块), 流从此一帧都没有 (长跑实测: 前 3 次超时
+        //   都还活着, 第 4 次之后 poll 再也不返回)。归还的是一块过了时限的旧帧, 内容本来
+        //   就要丢。
+        if (!wait_fence(newest.fence_fd, err)) {
+            newest.fence_fd = -1;      // wait_fence 两条路都已关掉这个内核给的 dup
+            queue_buffer(newest.index);
+            return false;
+        }
         newest.fence_fd = -1;   // 已关, 不留给调用方
 
         hold_index_ = newest.index;
