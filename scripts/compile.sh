@@ -27,7 +27,7 @@ PTHREAD="-pthread"
 # 模块清单 = src/ 下的全部可移植编译单元 (core/io 各 .cpp 逐一对应)
 MODULES="core/control core/estimator core/calib core/detect core/state \
          io/hid_mouse io/usbraw io/hotctl io/calib_run io/pad_input io/pad_output \
-         io/pad_xinput io/pad_p5g"
+         io/pad_xinput io/pad_p5g io/hdmi_in io/rga_pp"
 
 OBJS=""
 for m in $MODULES; do
@@ -69,4 +69,12 @@ $CXX -c "$SRC/core/calib_test.cpp" $CXX_FLAGS $INCLUDES -o "$BUILD/calib_test.o"
 $CXX "$BUILD/calib_test.o" $TEST_OBJS $LIBS $OCV $PTHREAD -o "$BUILD/calib_test"
 "$BUILD/calib_test"
 
-echo "✅ 编译完成 (可移植集 + 三个单测) → $BUILD"
+# HDMI IN 采集探针 (板端验收工具, 不是单测): 裸 V4L2 取帧 + RGA 裁剪/格式 + 与 mmap
+#   采集缓冲的逐字节 CPU 对照 + 各阶段 PNG。同一链接方式 (除 main.o 外的模块对象);
+#   它需要活动信号与 root, 故只构建不执行 —— 运行: sudo ./build/hdmi_probe 600
+# shellcheck disable=SC2086
+$CXX -c "$ROOT/scripts/test/hdmi_probe.cpp" $CXX_FLAGS $INCLUDES -o "$BUILD/hdmi_probe.o"
+# shellcheck disable=SC2086
+$CXX "$BUILD/hdmi_probe.o" $TEST_OBJS $LIBS $OCV $PTHREAD -o "$BUILD/hdmi_probe"
+
+echo "✅ 编译完成 (可移植集 + 三个单测 + 采集探针) → $BUILD"
