@@ -27,7 +27,7 @@ PTHREAD="-pthread"
 # 模块清单 = src/ 下的全部可移植编译单元 (core/io 各 .cpp 逐一对应)
 MODULES="core/control core/estimator core/calib core/detect core/state \
          io/hid_mouse io/usbraw io/hotctl io/calib_run io/pad_input io/pad_output \
-         io/pad_xinput io/pad_p5g io/hdmi_in io/rga_pp"
+         io/pad_xinput io/pad_p5g io/hdmi_in io/rga_pp io/npu_axcl"
 
 OBJS=""
 for m in $MODULES; do
@@ -69,6 +69,15 @@ $CXX -c "$SRC/core/calib_test.cpp" $CXX_FLAGS $INCLUDES -o "$BUILD/calib_test.o"
 $CXX "$BUILD/calib_test.o" $TEST_OBJS $LIBS $OCV $PTHREAD -o "$BUILD/calib_test"
 "$BUILD/calib_test"
 
+# 检测输出解析单测 (布局解析与四种真实导出形状 / 锚点数由模型几何给出 / 口径判定与
+#   它的退路口径 / 四支解码的手算候选 / DFL 头的分布期望 / NMS): 同一链接方式, 断言
+#   失败即终止整个编译。
+# shellcheck disable=SC2086
+$CXX -c "$SRC/core/detect_test.cpp" $CXX_FLAGS $INCLUDES -o "$BUILD/detect_test.o"
+# shellcheck disable=SC2086
+$CXX "$BUILD/detect_test.o" $TEST_OBJS $LIBS $OCV $PTHREAD -o "$BUILD/detect_test"
+"$BUILD/detect_test"
+
 # HDMI IN 采集探针 (板端验收工具, 不是单测): 裸 V4L2 取帧 + RGA 裁剪/格式 + 与 mmap
 #   采集缓冲的逐字节 CPU 对照 + 各阶段 PNG。同一链接方式 (除 main.o 外的模块对象);
 #   它需要活动信号与 root, 故只构建不执行 —— 运行: sudo ./build/hdmi_probe 600
@@ -77,4 +86,12 @@ $CXX -c "$ROOT/scripts/test/hdmi_probe.cpp" $CXX_FLAGS $INCLUDES -o "$BUILD/hdmi
 # shellcheck disable=SC2086
 $CXX "$BUILD/hdmi_probe.o" $TEST_OBJS $LIBS $OCV $PTHREAD -o "$BUILD/hdmi_probe"
 
-echo "✅ 编译完成 (可移植集 + 三个单测 + 采集探针) → $BUILD"
+# NPU 推理探针 (板端验收工具, 不是单测): 一个 .axmodel 的 IO 契约 / 真图端到端解码 /
+#   输入与原始输出的落盘 / 各段耗时百分位 / 传输尺寸扫描。它需要 root 与 AXCL 卡,
+#   故只构建不执行 —— 运行: sudo LD_LIBRARY_PATH=/usr/lib/axcl ./build/model_probe <model>
+# shellcheck disable=SC2086
+$CXX -c "$ROOT/scripts/test/model_probe.cpp" $CXX_FLAGS $INCLUDES -o "$BUILD/model_probe.o"
+# shellcheck disable=SC2086
+$CXX "$BUILD/model_probe.o" $TEST_OBJS $LIBS $OCV $PTHREAD -o "$BUILD/model_probe"
+
+echo "✅ 编译完成 (可移植集 + 四个单测 + 采集探针 + NPU 探针) → $BUILD"
