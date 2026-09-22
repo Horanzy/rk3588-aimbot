@@ -4,8 +4,7 @@
 #  路径相对脚本自身解析, 与部署位置无关。
 #  模块结构: main (入口) + core/ (共享状态/控制律/估计器/标定/检测输出解析)
 #            + io/ (取帧与 NPU 推理/鼠标输入与 USB 输出/热参); 逐编译单元编译到
-#            build/ 再链接。本步只构建**可移植集**: 入口与取帧/NPU 推理模块随后续
-#            步骤落地再进 MODULES, 因此这里只出三个单测, 不留半成品 bin/aimbot。
+#            build/ 再链接。
 # ==============================================================================
 set -e
 ROOT="$(cd "$(dirname "$(realpath "$0")")/.." && pwd)"
@@ -16,14 +15,13 @@ mkdir -p "$BUILD" "$BIN"
 
 CXX=g++
 CXX_FLAGS="-O3 -DNDEBUG -std=c++17"
-INCLUDES="-I$SRC -I/usr/include/opencv4 -I/usr/include/axcl"
+INCLUDES="-I$SRC -I/usr/include/opencv4 -I/usr/include/axcl -I/usr/local/include/rga"
 OCV="-lopencv_core -lopencv_videoio -lopencv_highgui -lopencv_imgproc -lopencv_video -lopencv_imgcodecs"
 
-# axcl (NPU 运行时) 装在 /usr/lib/axcl 且已进 ldconfig; librga 在板上只有 out-of-tree
-#   一份 (无系统安装), 故另给 -L 并用 -rpath 带上运行期查找路径, 位置可用 RGA_LIB_DIR
-#   覆盖 — 本步的模块都不引用两者的符号, 这里只是把链接面备好。
-RGA_LIB_DIR="${RGA_LIB_DIR:-$HOME/hdmirx-work/librga/libs/Linux/gcc-aarch64}"
-LIBS="-L/usr/lib/axcl -L$RGA_LIB_DIR -Wl,-rpath,$RGA_LIB_DIR -laxcl_rt -laxcl_pkg -lrga"
+# axcl (NPU 运行时) 与 librga (裁切/格式转换) 都是**部署机自带的系统库**: axcl 装在
+#   /usr/lib/axcl 并已进 ldconfig, librga 装在 /usr/local (头文件 /usr/local/include/rga),
+#   两者都由 scripts/setup_platform.sh 从上游装好 —— 与本库自身放在哪里无关。
+LIBS="-L/usr/lib/axcl -laxcl_rt -laxcl_pkg -lrga"
 PTHREAD="-pthread"
 
 # 模块清单 = src/ 下的全部可移植编译单元 (core/io 各 .cpp 逐一对应)
