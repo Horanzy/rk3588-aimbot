@@ -238,7 +238,7 @@ main section { display: flex; flex-direction: column; gap: var(--sp); }
 .form-row { display: flex; gap: 10px; align-items: center; margin: 9px 0; flex-wrap: wrap; }
 .form-col { display: flex; flex-direction: column; gap: 5px; font-size: 13px; color: var(--muted); margin-top: 10px; }
 
-/* ---------- 文件列表 (engine / onnx) ---------- */
+/* ---------- 文件列表 (模型 axmodel) ---------- */
 .filelist { display: flex; flex-direction: column; gap: 6px; max-height: 300px; overflow: auto; }
 .frow {
   display: flex; align-items: center; gap: 9px; padding: 7px 10px; font-size: 13px;

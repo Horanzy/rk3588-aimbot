@@ -108,20 +108,14 @@
 
     <!-- ======== 模型与运维 ======== -->
     <section id="tab-ops" class="hidden">
-      <div class="grid2">
-        <div class="card">
-          <div class="card-hd"><h3>模型 engine</h3></div>
-          <div id="engineList" class="filelist"></div>
+      <div class="card">
+        <div class="card-hd">
+          <h3>模型 axmodel</h3>
+          <div class="card-tools"><span class="hint" id="modelCount"></span></div>
         </div>
-        <div class="card">
-          <div class="card-hd">
-            <h3>onnx 转换源</h3>
-            <div class="card-tools">
-              <button id="btnConvert" class="btn small">⏵ 转换 convert</button>
-            </div>
-          </div>
-          <div id="onnxList" class="filelist"></div>
-        </div>
+        <p class="hint">模型转换在本仓库之外的 AX 工具链里完成 —— 转好的 <code>.axmodel</code> 放进
+          部署根的 <code>engine/</code> 即出现在这里。面板不做转换, 只负责列出/选用与编译固件。</p>
+        <div id="modelList" class="filelist"></div>
       </div>
 
       <div class="card">
@@ -131,7 +125,8 @@
             <button id="btnCompile" class="btn small">⏵ 编译 compile</button>
           </div>
         </div>
-        <p class="hint">convert 把 onnx/ 下所有缺失的模型转成 engine (慢, 分钟级); compile 重编 bin/aimbot (改了固件后需要)。实例运行中时编译会被拒绝。</p>
+        <p class="hint">compile 重编 bin/aimbot (改了固件后需要, 分钟级)。实例运行中时编译会被拒绝
+          —— 运行中的二进制无法被覆盖。</p>
         <div id="taskList"></div>
       </div>
 
@@ -145,7 +140,9 @@
     <section id="tab-settings" class="hidden">
       <div class="card">
         <div class="card-hd"><h3>部署根目录</h3></div>
-        <p class="hint">含 scripts/ 的那一层。WebUI 按结构发现: scripts/game/*.sh 为游戏 profile, engine/ onnx/ dataset/ 按约定解析。所有路径/设备输入都来自发现结果, 不需要手填路径。</p>
+        <p class="hint">含 scripts/ 的那一层。WebUI 按结构发现: scripts/game/*.sh 为游戏 profile,
+          engine/ 下 *.axmodel 为模型, dataset/ 为采集输出根, 采集设备 = 板载 HDMI 接收器
+          (驱动名 rk_hdmirx, 现场读锁定状态/分辨率/刷新率/像素格式)。所有路径/设备输入都来自发现结果, 不需要手填路径。</p>
         <div class="form-row">
           <input id="rootInput" type="text" spellcheck="false" placeholder="<deploy-root>">
           <button id="btnRootSave" class="btn primary">保存并扫描</button>

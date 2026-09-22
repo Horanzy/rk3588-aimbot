@@ -1,19 +1,23 @@
-"""结构化发现: 从部署根按约定目录派生 游戏 profile / 模型 / 转换源 / 采集设备。
+"""结构化发现: 从部署根按约定目录派生 游戏 profile / 模型 / HDMI 接收器。
 
-只按固定结构发现 (scripts/game/, engine/, onnx/, /dev/v4l/by-id/), 不递归扫全盘。
+只按固定结构发现 (scripts/game/, engine/, /sys/class/video4linux/), 不递归扫全盘。
 **脚本 = 唯一事实源**: profile 参数就是 game 脚本头部的 VAR=value 块, 每次扫描现场解析,
 没有独立存储; WebUI 的【保存】通过 write_script_params 原子写回脚本 (只改目标变量的值,
 注释/引号风格/其余行逐字保留)。脚本把手改量写成 `${VAR:-默认}` 守卫 (缺行也能起), 所以
 读取时解析到守卫里的有效默认值, 见到的是值而不是字面量。唯一的另一处脚本写回是固件经
 -S 的标定回写机制。
+
+采集侧只有**一块内建接收器** (板载 HDMI RX, 驱动名 rk_hdmirx, sysfs 节点名
+stream_hdmirx), 它没有 /dev/v4l/by-id 节点, 所以发现按固件同一条判据走: 扫
+/sys/class/video4linux/video*/name 取名字含 `hdmirx` 的那个节点 (判据取自驱动名与节点名
+共有的子串, 见 src/io/hdmi_in.h)。信号状态由 v4l2-ctl --all 现场读出 (锁定状态 / 分辨率 /
+刷新率 / 像素格式) —— 接收器没锁定时固件起不来, 所以这条状态必须在启动前可见。
 """
-import json
 import os
 import re
+import subprocess
 import time
 from pathlib import Path
-
-from . import config
 
 VAR_RE = re.compile(r"^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*?)\s*$")
 SCRIPT_STEM_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -29,8 +33,13 @@ PARAM_DEFS = {
     "class_id":        dict(kind="int",   lo=0, hi=255, default=0),
     "conf":            dict(kind="float", lo=0.0, hi=1.0, default=0.5),
     "y_offset":        dict(kind="float", lo=0.0, hi=100.0, default=65.0),
-    "cam_dev":         dict(kind="str",   default="Asus"),
-    "cam_fps":         dict(kind="int",   lo=1, hi=240, default=120),
+    # 采集设备 = /dev/videoN (空 = 固件按驱动名解析接收器节点); 帧率不是参数:
+    #   采集率由信号决定 (接收器锁定的时序), 检测率看日志 [AI FPS] 行
+    "cam_dev":         dict(kind="str",   default=""),
+    # 模型类数 -n: 0 = 由输出属性数自解 (网格头); **未折叠 DFL 头必须给** (公开 YOLO11 = 80)
+    #   —— 该头的属性数 = 4·reg_max + 类数, 而 reg_max 不是可观测量。上界 1000 是防误输入,
+    #   取值带是公开检测数据集的类数量级 (COCO 80, 千级即上限)。
+    "class_n":         dict(kind="int",   lo=0, hi=1000, default=0),
     "max_speed":       dict(kind="float", lo=100.0, hi=20000.0, default=2000.0),
     # 输出模式 (冷: 它决定整条输出后端, 运行中不可换) 与各模式的设备选择
     "output_mode":     dict(kind="enum",  choices=OUTPUT_MODES, default="hid"),
@@ -83,8 +92,9 @@ def mode_spd_keys(mode) -> dict:
 
 
 SCRIPT_VARS = {
-    "CLASS_ID": "class_id", "CONF_THRESH": "conf", "Y_OFFSET": "y_offset",
-    "CAM_DEV": "cam_dev", "CAM_FPS": "cam_fps", "MAX_SPEED": "max_speed",
+    "CLASS_ID": "class_id", "CLASS_N": "class_n", "CONF_THRESH": "conf",
+    "Y_OFFSET": "y_offset",
+    "CAM_DEV": "cam_dev", "MAX_SPEED": "max_speed",
     "OUTPUT_MODE": "output_mode",                        # 冷: 决定整条输出后端
     "MOUSE_KEYWORD": "mouse_keyword",                    # hid: -D
     "PAD_KEYWORD": "pad_keyword",                        # pad/p5g: -P
@@ -247,7 +257,7 @@ def _fmt_value(key: str, val, root: Path) -> str:
 
     脚本尾部以路径变量直接展开传参, 相对路径会随 cwd 漂 —— 所以部署根内的路径一律写成
     `$ROOT/<相对>`, 解析时再还原。这一对是往返恒等的, 一次保存不会把用户写好的
-    `$ROOT/engine/x.engine` 改写成绝对路径 (那会让"只改目标 VAR"变成两处改动)。
+    `$ROOT/engine/x.axmodel` 改写成绝对路径 (那会让"只改目标 VAR"变成两处改动)。
 
     延迟是唯一的浮点手改量, 写法固定一位小数 (= 固件标定回写的格式): 它是往返恒等的,
     于是保存 pad 槽时 hid/p5g 槽的延迟行逐字不动。"""
@@ -375,11 +385,12 @@ def scan_profiles(root: Path) -> list:
 
 # ---------- 其它发现 ----------
 
-def list_engines(root: Path) -> list:
+def list_models(root: Path) -> list:
+    """engine/**/*.axmodel —— 模型转换在本仓库之外完成, 这里只列已经放好的模型。"""
     out = []
     edir = root / "engine"
     if edir.is_dir():
-        for p in sorted(edir.rglob("*.engine")):
+        for p in sorted(edir.rglob("*.axmodel")):
             try:
                 st = p.stat()
             except OSError:
@@ -389,46 +400,141 @@ def list_engines(root: Path) -> list:
     return out
 
 
-def list_onnx(root: Path) -> list:
+# ---------- HDMI 接收器 (唯一采集源) ----------
+
+# 判据与固件 io/hdmi_in.h 的 HDMIRX_NAME_SUBSTR 同一串: 驱动名 rk_hdmirx 与 sysfs
+#   节点名 stream_hdmirx 共有的子串 —— 两处名字都换掉也不会认错设备。
+HDMIRX_NAME_SUBSTR = "hdmirx"
+V4L2_CTL = "v4l2-ctl"
+# 一次 --all 是只读查询 (取不到锁时立刻返回), 放 5s 上限只为兜住设备卡住的极端情形
+V4L2_TIMEOUT_S = 5
+_RE_VIDEO_INPUT = re.compile(r"Video input\s*:\s*\d+\s*\(([^)]*)\)")
+_RE_ACTIVE_W = re.compile(r"Active width:\s*(\d+)")
+_RE_ACTIVE_H = re.compile(r"Active height:\s*(\d+)")
+_RE_FPS = re.compile(r"\(([\d.]+) frames per second\)")
+_RE_FMT = re.compile(r"Pixel Format\s*:\s*'([^']+)'\s*\(([^)]*)\)")
+
+
+def sysfs_video_nodes() -> list:
+    """扫 /sys/class/video4linux/video*/name → 名字含 hdmirx 的节点 (与固件同一判据)。
+
+    节点下标跨重启不稳定 (同一张板子两次启动 hdmirx 落在不同号上), 所以按名字找节点、
+    不按号记节点。返回 [{"node", "name", "driver"}], 按节点号排序 (确定性)。"""
+    base = Path("/sys/class/video4linux")
     out = []
-    odir = root / "onnx"
-    if odir.is_dir():
-        for p in sorted(odir.rglob("*.onnx")):
-            rel = p.relative_to(root)
-            eng = root / "engine" / rel.with_suffix(".engine")
-            try:
-                ost = p.stat()
-                est = eng.stat() if eng.is_file() else None
-            except OSError:
-                continue
-            out.append({"path": rel.as_posix(), "size": ost.st_size, "mtime": ost.st_mtime,
-                        "engine": rel.with_suffix(".engine").as_posix() if est else None,
-                        "stale": bool(est and ost.st_mtime > est.st_mtime)})
+    try:
+        entries = sorted(base.glob("video*"))
+    except OSError:
+        return out
+    for d in entries:
+        try:
+            name = (d / "name").read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            continue
+        if HDMIRX_NAME_SUBSTR not in name:
+            continue
+        driver = ""
+        try:
+            # device → ../../../fdee0000.hdmirx-controller, driver 符号链接指向 rk_hdmirx
+            drv = (d / "device" / "driver").resolve()
+            driver = drv.name
+        except OSError:
+            pass
+        out.append({"node": "/dev/" + d.name, "name": name, "driver": driver})
     return out
 
 
-def list_cameras() -> list:
-    """枚举 /dev/v4l/by-id/*-video-index0 → /dev/videoN;
-    Hagibis/Asus 别名按固件 resolve_cam_device 同规则 (小写子串, 唯一命中) 测试后加入。"""
-    by_id = Path("/dev/v4l/by-id")
-    entries = []
+def hdmi_signal_state(node: str) -> dict:
+    """现场读接收器的信号状态: 锁定与否 / 分辨率 / 刷新率 / 像素格式。
+
+    一次 `v4l2-ctl -d <node> --all` 全给 (实测输出, 各字段都从这里取):
+        Driver name      : rk_hdmirx
+        Video input : 0 (hdmirx: ok)          ← 锁定状态 (括号里就是驱动的自述)
+        DV timings:
+            Active width: 2560 / Active height: 1440
+            Pixelclock: 497768000 Hz (120.00 frames per second)
+        Format Video Capture Multiplanar:
+            Pixel Format      : 'BGR3' (24-bit BGR 8-8-8)
+    括号里的自述与 DV timings 是两处独立证据, 两者不一致时报未锁定 (有一处说没锁就是
+    没锁)。取不到 (命令缺失/超时/节点不可打开) 时返回 ok=False 与原因, 不猜状态。"""
+    out = {"ok": False, "error": "", "locked": False, "status": "",
+           "width": None, "height": None, "fps": None,
+           "pixel_format": "", "pixel_desc": "", "raw": ""}
     try:
-        for p in sorted(by_id.iterdir()):
-            if p.name.endswith("-video-index0"):
-                try:
-                    entries.append({"id": p.name, "node": str(p.resolve())})
-                except OSError:
-                    pass
-    except OSError:
-        return []
-    cams = [{"value": e["node"], "label": "%s  (%s)" % (e["node"], e["id"]),
-             "alias": False} for e in entries]
-    for alias in ("Hagibis", "Asus"):
-        hits = [e for e in entries if alias.lower() in e["id"].lower()]
-        if len(hits) == 1:
-            cams.insert(0, {"value": alias, "label": "%s → %s" % (alias, hits[0]["node"]),
-                            "alias": True})
-    return cams
+        p = subprocess.run([V4L2_CTL, "-d", node, "--all"],
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                           stdin=subprocess.DEVNULL, timeout=V4L2_TIMEOUT_S)
+    except FileNotFoundError:
+        out["error"] = "找不到 %s (v4l2-utils 未安装)" % V4L2_CTL
+        return out
+    except subprocess.TimeoutExpired:
+        out["error"] = "%s 超时 (%ds): 设备无响应" % (V4L2_CTL, V4L2_TIMEOUT_S)
+        return out
+    except OSError as e:
+        out["error"] = str(e)
+        return out
+    text = (p.stdout or b"").decode("utf-8", "replace")
+    out["raw"] = text.strip()
+    m = _RE_VIDEO_INPUT.search(text)
+    if m:
+        out["status"] = m.group(1).strip()
+    mw, mh = _RE_ACTIVE_W.search(text), _RE_ACTIVE_H.search(text)
+    if mw and mh:
+        out["width"], out["height"] = int(mw.group(1)), int(mh.group(1))
+    m = _RE_FPS.search(text)
+    if m:
+        try:
+            out["fps"] = float(m.group(1))
+        except ValueError:
+            pass
+    m = _RE_FMT.search(text)
+    if m:
+        out["pixel_format"], out["pixel_desc"] = m.group(1), m.group(2)
+    timings = out["width"] is not None and out["height"] is not None and out["fps"] is not None
+    stated_ok = "ok" in out["status"].lower()
+    out["locked"] = bool(stated_ok and timings)
+    if not out["status"] and not timings:
+        out["error"] = "读不到接收器状态 (设备被占用或节点无响应)"
+    elif not out["locked"]:
+        out["error"] = "接收器未锁定信号" + (" (驱动自述: %s)" % out["status"] if out["status"] else "")
+    out["ok"] = True
+    return out
+
+
+def list_hdmi_inputs() -> list:
+    """接收器节点 + 现场信号状态 (下拉与状态卡共用一份读数)。
+
+    label 里带上锁定状态与格式 —— 参数页的采集设备选择就是这个下拉, 于是"选中的接收器
+    现在有没有信号"在选择处即可见。"""
+    out = []
+    for n in sysfs_video_nodes():
+        sig = hdmi_signal_state(n["node"])
+        item = dict(n)
+        item.update({k: sig[k] for k in ("ok", "error", "locked", "status",
+                                         "width", "height", "fps",
+                                         "pixel_format", "pixel_desc")})
+        item["label"] = hdmi_label(item)
+        out.append(item)
+    return out
+
+
+def hdmi_label(item: dict) -> str:
+    parts = [item["node"]]
+    if not item.get("ok"):
+        parts.append("状态未知 (%s)" % (item.get("error") or "读取失败"))
+    elif item.get("locked"):
+        parts.append("已锁定 %dx%d @%s Hz · %s" % (item["width"], item["height"],
+                                                  _fmt_hz(item["fps"]), item["pixel_format"]))
+    else:
+        parts.append("无信号 (%s)" % (item.get("status") or "接收器未锁定"))
+    if item.get("driver"):
+        parts.append(item["driver"])
+    return " · ".join(parts)
+
+
+def _fmt_hz(v) -> str:
+    """刷新率两位小数 —— 与 v4l2-ctl 自己的写法一致 (实测 120.00 / 60.00)。"""
+    return "%.2f" % float(v) if v is not None else "—"
 
 
 def list_dataset_dirs(root: Path) -> list:
@@ -481,23 +587,31 @@ def scan(root: Path) -> dict:
     """全量发现一次。永不抛异常 —— 任何失败转成 status/error/warnings 在页面可见。"""
     status, err = root_status(root)
     out = {"status": status, "error": err, "scanned_at": time.time(),
-           "profiles": [], "engines": [], "onnx": [], "cameras": [],
+           "profiles": [], "models": [], "hdmi_in": [],
            "dataset_dirs": [], "binary": {"exists": False, "hot_capable": False},
            "warnings": []}
     if status != "ok":
         return out
     out["profiles"] = scan_profiles(root)
-    out["engines"] = list_engines(root)
-    out["onnx"] = list_onnx(root)
-    out["cameras"] = list_cameras()
+    out["models"] = list_models(root)
+    out["hdmi_in"] = list_hdmi_inputs()
     out["dataset_dirs"] = list_dataset_dirs(root)
     out["binary"] = binary_info(root)
-    if not out["engines"]:
-        out["warnings"].append("engine/ 下没有 *.engine —— 先在「模型与运维」页转换, 才能选择模型")
+    if not out["models"]:
+        out["warnings"].append("engine/ 下没有 *.axmodel —— 模型转换在本仓库之外完成, "
+                               "转好后放进 engine/ 才能选择模型")
     if not out["profiles"]:
         out["warnings"].append("scripts/game/ 下没有 *.sh —— 没有可启动的游戏 profile")
-    if not out["cameras"]:
-        out["warnings"].append("未发现采集设备 (/dev/v4l/by-id 为空), 启动会被固件拒绝")
+    if not out["hdmi_in"]:
+        out["warnings"].append("未发现 HDMI 接收器 (扫 /sys/class/video4linux/video*/name "
+                               "里含 \"%s\" 的节点), 启动会被固件拒绝" % HDMIRX_NAME_SUBSTR)
+    else:
+        for h in out["hdmi_in"]:
+            if not h["ok"]:
+                out["warnings"].append("%s: %s — 启动前先确认信号" % (h["node"], h["error"]))
+            elif not h["locked"]:
+                out["warnings"].append("%s: 接收器未锁定信号 (%s), 启动会被固件拒绝"
+                                       % (h["node"], h["status"] or "无时序"))
     if not out["binary"]["exists"]:
         out["warnings"].append("bin/aimbot 不存在 —— 先执行 compile, 否则无法启动")
     elif not out["binary"]["hot_capable"]:

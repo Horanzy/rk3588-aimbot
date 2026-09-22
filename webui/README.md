@@ -1,19 +1,18 @@
 # aimbot WebUI
 
-从局域网任意设备的浏览器管理 Jetson 上的 aimbot —— 启动/停止、参数编辑（含热参数即时下发）、
-模型转换与编译、实时日志、温度/帧率监控。**UI 是编排者不是替代者**：SSH 手跑 game 脚本、
-`compile.sh` / `convert.sh` / `setup_mouse.sh`、aimbot 命令行接口全部保持原样，WebUI 只按既有
-约定编排它们。
+从局域网任意设备的浏览器管理 RK3588 板上的 aimbot —— 启动/停止、参数编辑（含热参数即时下发）、
+固件编译、实时日志、CPU/内存/NPU/温度监控。**UI 是编排者不是替代者**：SSH 手跑 game 脚本、
+`compile.sh` / `setup_platform.sh`、aimbot 命令行接口全部保持原样，WebUI 只按既有约定编排它们。
 
 ```
 浏览器 (PC / 手机, 局域网)
-   │ http://<jetson-ip>/  (密码登录; token 直达/兜底)
+   │ http://<board-ip>/  (密码登录; token 直达/兜底)
    ▼
 webui/server.py (FastAPI, systemd root 服务)
-   ├─ 结构化发现: scripts/game/*.sh · engine/ · onnx/ · /dev/v4l/by-id/
-   ├─ 实例管理: jetson_clocks → setup_mouse.sh → bin/aimbot (与 game 脚本完全同构)
+   ├─ 结构化发现: scripts/game/*.sh · engine/*.axmodel · 板载 HDMI 接收器 (含信号状态) · dataset/
+   ├─ 实例管理: setup_platform.sh → bin/aimbot (与 game 脚本完全同构)
    ├─ 热参数: UDP 127.0.0.1:47700 → 运行中的 aimbot 即时生效
-   └─ 运维任务: convert.sh / compile.sh 异步执行, 日志流回传
+   └─ 运维任务: compile.sh 异步执行, 日志流回传
 ```
 
 ## 输出模式与真机拓扑
@@ -40,64 +39,79 @@ webui/server.py (FastAPI, systemd root 服务)
   整套换（显示的、编辑的、保存的都是那一槽），标定也只落进本槽。分槽是必须的 —— 同一个倍率数
   在两套口径下含义不同（见下一节），延迟也各是自己的物理量（p5g 的回路还含一跳加密狗签名往返）。
 
-## 部署（Jetson）
+## 部署（RK3588 板端, Armbian）
+
+系统 Python 是 3.14.4，仓库的 `--break-system-packages` 禁令照旧适用，所以依赖走**发行版包**
+（`python3-fastapi` 0.118.0 / `python3-uvicorn` 0.38.0 / `python3-websockets` 15.0.1，都在
+Ubuntu `resolute/universe` 的 arm64 源里）—— 不新建 venv：省掉一套要跟着板子升级的私有环境，
+systemd unit 直接用 `/usr/bin/python3` 即可。
 
 ```bash
-# 1. 依赖 (需要网络; 离线见下节)
-cd <deploy-root>/webui
-sudo python3 -m pip install -r requirements.txt
+# 1. 依赖 (发行版包; 无网络时先在有网机器上 apt download 对应 deb 再 dpkg -i)
+sudo apt-get update
+sudo apt-get install -y python3-fastapi python3-uvicorn python3-websockets
 
-# 2. 安装并启动 systemd 服务 (生成 unit、开机自启)
+# 2. 安装并启动 systemd 服务 (生成 unit、开机自启、补齐平台前提)
 sudo bash deploy/install.sh
 
 # 3. 打开
 #    token 打印在服务日志里 (首次设置密码要用):
 sudo journalctl -u aimbot-webui -n 20 --no-pager
-#    浏览器访问  http://<jetson-ip>/  → 首次凭 token 设置登录密码, 之后密码登录
+#    浏览器访问  http://<board-ip>/  → 首次凭 token 设置登录密码, 之后密码登录
 ```
 
 手动试跑（不装服务）：`cd webui && sudo python3 server.py`。
 
-要求：JetPack 自带的 python3 (≥3.8) 即可，无需 venv（这是服务端，不是 arena）。
+平台前提（`install.sh` 检查并补齐，逐条理由见该脚本的注释）：
+
+- `axcl-smi`（AXCL 运行时自带，装在 `/usr/bin/axcl/`）—— NPU 占用与卡温的读数源；不在时
+  NPU 两项在页面消失，其余照常。
+- 内核 `raw_gadget` 模块与 `/dev/raw-gadget` —— USB 输出通道（`-M hid/pad/p5g` 三个模式都
+  走它）；`install.sh` 当场 `modprobe` 并写 `/etc/modules-load.d/` 使其开机自载。
+- `librga` 与 `/dev/rga` —— 采集/预处理链的系统库；由启动序列里的
+  `scripts/setup_platform.sh` 每次校验（幂等，装好时只回读版本后退出）。
+- `v4l2-ctl`（`v4l2-utils`）—— HDMI 接收器信号状态的读数源（锁定/分辨率/刷新率/像素格式）。
 
 ### 更新（已装服务的机器）
 
 覆盖 `webui/` 下的代码（`app/` `static/` `server.py`；**保留 `webui/data/`** —— token、密码、
 profile 参数、历史都在里面），然后 `sudo systemctl restart aimbot-webui` 即可。
 页面与静态资源带 `Cache-Control: no-cache`，浏览器普通刷新就是最新界面，不用清缓存。
-依赖没变（requirements.txt 未改）时不用重装。
+依赖没变（`requirements.txt` 未改）时不用重装。
 
-### 离线安装
+### 纯 pip / venv 路线（发行版包不合适时）
 
-在有网的 x86 机器上下载 aarch64 轮子后拷到 Jetson：
+依赖面等价，只是多一层自己的环境：
 
 ```bash
-pip download -r requirements.txt \
-    --platform manylinux2014_aarch64 --only-binary=:all: -d wheels/
-# Jetson 上:
-sudo python3 -m pip install --no-index --find-links wheels/ -r requirements.txt
+cd <deploy-root>/webui
+python3 -m venv .venv && .venv/bin/python -m pip install -r requirements.txt
+# systemd unit 里把 ExecStart 换成 <webui>/.venv/bin/python <webui>/server.py
 ```
+
+离线时在有网的机器上 `pip download -r requirements.txt --platform manylinux2014_aarch64
+--only-binary=:all: -d wheels/`，再在板上 `pip install --no-index --find-links wheels/ -r requirements.txt`。
 
 ## 权限模型（为什么服务以 root 跑）
 
-现有流程里，`jetson_clocks`、USB 鼠标通道准备（`setup_mouse.sh`：载入 raw_gadget、腾空 UDC、
-`/dev/raw-gadget` 权限）、采集卡节点全部在 `sudo` 之下 —— 手动 SSH 跑 game 脚本就是 root 环境。
-WebUI 要 1:1 复刻该环境，只有两条路：
+现有流程里，采集（`/dev/rga` 与接收器节点）、USB 输出（`/dev/raw-gadget`）、固件编译与
+`setup_platform.sh` 全部在 `sudo` 之下 —— 手动 SSH 跑 game 脚本就是 root 环境。WebUI 要 1:1
+复刻该环境，只有两条路：
 
 1. **服务直接以 root 跑（采用）**：零 sudoers 维护；部署目录改名/移动后不需要任何额外配置；
-   行为与手动跑完全一致。
+   行为与手动跑完全一致。信号状态查询（`v4l2-ctl` 打开接收器）与 `axcl-smi` 也正好要 root。
 2. 替代方案（更小权限面）：服务跑普通用户，sudoers 里只放行两条固定路径 ——
-   `<部署根>/scripts/setup_mouse.sh` 与 `jetson_clocks`（NOPASSWD）。**aimbot 本身不加 sudo
-   前缀**（它和手动跑一样缺不了 /dev/input 的读权限，见下），所以服务用户必须属于 `input`
+   `<部署根>/scripts/setup_platform.sh` 与 `modprobe raw_gadget`（NOPASSWD）。**aimbot 本身不加
+   sudo 前缀**（它和手动跑一样缺不了 `/dev/input` 的读权限），所以服务用户必须属于 `input`
    组，否则手柄/鼠标节点一律读不到（实测：不在 input 组时鼠标节点报"不可读"、`-D` 直接失败）。
-   代价：换部署根要同步改 sudoers；`/dev/raw-gadget` 权限由 setup_mouse.sh 每次 launch
-   `chmod 666` 给出，通常没问题。这正是服务以 root 跑最省事的理由。
+   代价：换部署根要同步改 sudoers；`/dev/raw-gadget` 与 `/dev/rga` 的属主/权限由部署机自己
+   给（见"平台前提"）。这正是服务以 root 跑最省事的理由。
 
 暴露面 = 局域网 + 密码门槛（token 兜底）。不需要暴露时，在设置页把监听改成 `127.0.0.1`。
 
 ## 安全（极简）
 
-- **密码登录为主**：首次打开页面要求凭 token 设置密码（证明你有权配置这台 Jetson），
+- **密码登录为主**：首次打开页面要求凭 token 设置密码（证明你有权配置这块板），
   之后日常输密码即可。密码只存 PBKDF2-SHA256 哈希（`webui/data/config.json`，纯标准库）。
 - **token 保留为万能凭证**：登录成功后服务端把 token 发给浏览器存 localStorage，
   之后所有 API 仍走 `X-WebUI-Token` 头（WS 走 `?token=`），鉴权管道只有一条。token 的用途：
@@ -111,11 +125,17 @@ WebUI 要 1:1 复刻该环境，只有两条路：
 
 - **部署根**在设置页指定（默认 = webui/ 的上一层），一切发现按目录结构确定性推导，不递归扫全盘：
   - 游戏 profile = `<根>/scripts/game/*.sh`（只读解析顶部 `VAR=value` 块）；
-  - 模型 = `<根>/engine/**/*.engine`；转换源 = `<根>/onnx/**/*.onnx`；
-  - 采集卡 = `/dev/v4l/by-id/*-video-index0`，`Hagibis`/`Asus` 别名按固件
-    `resolve_cam_device` 同规则（小写子串、唯一命中）测试后才进下拉；
+  - 模型 = `<根>/engine/**/*.axmodel` —— 转换在本仓库之外的 AX 工具链里做，转好的文件放进
+    `engine/` 即被发现；面板不做转换，也没有转换任务；
+  - 采集设备 = **板载 HDMI 接收器**：扫 `/sys/class/video4linux/video*/name` 取名字含 `hdmirx`
+    的节点（驱动名 `rk_hdmirx` 与节点名 `stream_hdmirx` 共有的子串，与固件
+    `src/io/hdmi_in.h` 同一判据）；节点号跨重启会变，所以按名字找节点而不按号记节点。
+    信号状态由 `v4l2-ctl -d <node> --all` 现场读出：驱动对输入的自述（`hdmirx: ok`）、
+    DV timings 的分辨率与刷新率、当前像素格式 —— 两处证据（自述与 timing）不一致时按未锁定报。
+    接收器没锁定时固件起不来，所以这条状态同时进参数页的设备下拉、设置页的扫描摘要与全局告警条。
+    没有 UVC 采集卡可选项，也没有帧率字段 —— 采集率是信号自己的；
   - 采集输出目录默认建议 `dataset/<游戏名>/`。
-- **模型/采集卡/输出目录都是下拉**（发现结果里选），设备匹配子串与数值项是输入框；
+- **模型/采集设备/输出目录都是下拉**（发现结果里选），设备匹配子串与数值项是输入框；
   部署根本身也是输入框。
 - 参数面按组落在脚本 VAR 上（每组一个 VAR，`app/discover.py` 的 `SCRIPT_VARS` 是唯一映射表）：
   - **输出模式与设备** = `OUTPUT_MODE` / `MOUSE_KEYWORD` / `PAD_KEYWORD` / `PAD_TRIG_THR` / `PAD_DUMP`
@@ -159,8 +179,9 @@ WebUI 要 1:1 复刻该环境，只有两条路：
 
 - 单实例不变量。状态机 `stopped → starting → running → exited`（退出码/信号/异常标记可查）。
 - **【启动】= 保存当前设置 → 清掉所有在跑实例（`/proc/*/exe` 精确匹配 `<根>/bin/aimbot`，
-  含 SSH 手跑的；SIGTERM → 5s 超时 SIGKILL）→ `jetson_clocks` → `setup_mouse.sh` → aimbot**。
-  `jetson_clocks` 失败只警示继续（与脚本行为一致）；`setup_mouse.sh` 失败中止并把 stderr 显示出来。
+  含 SSH 手跑的；SIGTERM → 5s 超时 SIGKILL）→ `scripts/setup_platform.sh` → aimbot**。
+  平台准备脚本幂等（装好时只回读版本后退出），失败则中止并把 stderr 显示出来 —— 缺 `librga`
+  时固件根本起不来，拉起一个必然失败的进程没有意义。
   “重启” = 再点一次【启动】。
 - **【保存】**只持久化。有未保存改动时按钮高亮、切页/切 profile 提示。
 - **孤儿认领**：WebUI 自身重启时扫描已存活的 aimbot 并认领为 running（认领实例无日志，
@@ -188,12 +209,14 @@ WebUI 要 1:1 复刻该环境，只有两条路：
 | `cap_auto` | 定时截图源开关 | `-e` | 0 / 1 |
 
 - 每次应用固件打印 `[热参] t=0.55`（UI 从日志流看到回执）；未知 key 忽略；启动时打印
-  `✅ 热参数通道: 127.0.0.1:47700 (t/y/x/fov/padthr/spdx/spdy/adsspdx/adsspdy/k/aim/cap_*)` ——
+  `✅ 热参数通道: 127.0.0.1:47700 (t/y/x/fov/padthr/spdx/spdy/adsspdx/adsspdy/k/aim/padcalib/cap_*)` ——
   WebUI 以该行为准判断固件能力，旧二进制（无此行/二进制探测失败）热参 UI 置灰，**不盲发 UDP**。
   倍率热参只有一套：保存时按**运行中实例的模式**取槽（实例跑 pad 时改 pad 槽 → 发 `spdx`；
   改 hid/p5g 槽 → 只是脚本改动，下次【启动】生效）；改 `output_mode`（冷参数）时本次不外发。
 - 结构性常量（PM/ζ/I gate/CUSUM…）是编译期原则常量，**不进白名单**；白名单里的是人手输入（延迟与四个速度倍率），律本身没有可调常数。
 - UI 上 🔥 = 热参数（保存即下发运行中实例），❄ = 冷参数（下次【启动】生效）。
+- 冷参数里采集侧只有一项：`-d` 采集节点（留空 = 固件按驱动名解析接收器）。帧率不进参数面
+  也不进白名单 —— 它由信号决定；类数 `-n`（`CLASS_N`）是模型属性，同样只在下一次启动生效。
 
 ## 目录
 
@@ -202,28 +225,29 @@ webui/
 ├── server.py            入口 (python3 server.py)
 ├── app/                 config / discover / proc / tasks / telemetry / api
 ├── static/              index.html + app.js + style.css (自托管, 零外链, 双主题, 手机可用)
-├── deploy/install.sh    生成 systemd unit 并启用 (路径从脚本自身解析)
-├── requirements.txt     fastapi / uvicorn / websockets (纯 Python 轮子)
+├── deploy/install.sh    平台前提 + 生成 systemd unit 并启用 (路径从脚本自身解析)
+├── requirements.txt     fastapi / uvicorn / websockets (发行版包或纯 Python 轮子, 两路等价)
 └── data/                运行时状态: config.json · history.json (gitignore)
 ```
 
 注意：服务必须单进程运行（systemd unit 就是单 worker），实例/任务管理是进程内单例。
 
-## 验收清单（Jetson 上）
+## 验收清单（板端）
 
 1. `sudo bash webui/deploy/install.sh` → `systemctl status aimbot-webui` 正常；
 2. `journalctl -u aimbot-webui` 里拿到 token，浏览器打开 → 首次凭 token 设置密码 →
    退出重进用密码登录；「改用 token 登录」也能进；错误密码会被拒；
-3. 设置页确认部署根正确、扫描摘要数量符合（profile/engine/onnx/采集卡）；
-4. 参数页改动置信度 → 【保存】→【启动】：步骤条三步全绿，日志出现
-   `✅ 热参数通道: …`（`[AI FPS]` 与 `[SAVE]` 不再出现在页面日志流,
-   FPS 显示在卡片、读数进「AI FPS 历史」面板、截图计数进「截图 本次」卡片;
+3. 设置页确认部署根正确、扫描摘要数量符合（profile/axmodel/dataset），且 **HDMI 接收器一行
+   给出锁定状态**（无信号时那行变 ⚠ 并在顶部横幅告警）；
+4. 参数页改动置信度 → 【保存】→【启动】：步骤条两步全绿（平台准备 → aimbot），日志出现
+   `✅ 热参数通道: …`、`✅ 采集设备: …`、`模型: …`（`[AI FPS]` 与 `[SAVE]` 不再出现在页面
+   日志流, FPS 显示在卡片、读数进「AI FPS 历史」面板、截图计数进「截图 本次」卡片;
    「模型架构」「输入尺寸」两卡片从启动日志的 `模型:` 行抓取, 每次启动刷新）;
 5. 运行中再改置信度 →【保存】：toast 显示已下发，日志出现 `[热参] t=…`；
 6. 【停止】→ 状态“已退出”；SSH 手动跑 game 脚本 → WebUI 显示“认领”而非“已停止”
    （认领实例「截图 本次」显示 —，「截图 文件夹」照常计数）；
 7. 按【启动】清掉 SSH 实例并以 UI 设置接管；
-8. convert / compile 任务能跑完且有日志/退出码；compile 在实例运行中时被拒绝并说明原因；
+8. compile 任务能跑完且有日志/退出码；compile 在实例运行中时被拒绝并说明原因；
 9. 手机浏览器（同局域网）打开：布局单列、按钮可点、日志可滚；
 10. 复制 profile → 新脚本出现在 `scripts/game/`（内容与源一致），SSH 直接跑它照常工作；
 11. 「截图 文件夹」与输出目录联动: 改 profile 的输出目录 (含绝对路径) → ~10s 后卡片路径跟随变化;
@@ -240,11 +264,14 @@ webui/
 14. **标定按钮**: 跑着 pad/p5g 实例时「运行」页的「开始标定」可点 → 日志出现
     `[热参] padcalib=1 (请求手柄标定)` 与随后的 `[标定] …` 行，成功时 `[标定] 已回写 … (PAD_L_EST /
     P5G_L_EST)` 并回显到本槽的延迟行；hid 模式下按钮置灰并写明触发方式是鼠标双侧键长按。
+15. **遥测**: 运行页卡片与顶栏出现 CPU / NPU / NPU 温度 / 内存 / SoC 温度；`axcl-smi` 不可用
+    （非 root 或卡缺席）时 NPU 两项消失而其余照常。
 
 ## 已知边界
 
-- 本仓库的 Windows 开发镜像只用于改代码；WebUI 的运行行为（绑定 80、/proc、udev、tegrastats）
-  以 Jetson 实机验收为准。
-- 视频预览（P2）未做：采集卡 NV12 1080p120 已占 ~3Gbps USB，二次 v4l2 打开会 EBUSY/抢帧；
-  将来做应走固件内抽帧，而不是再开一路采集。
-- GPU 占用依赖 `tegrastats`（Jetson 自带），读不到时 UI 隐藏该卡片。
+- 本仓库的 Windows 开发镜像只用于改代码；WebUI 的运行行为（绑定 80、`/proc`、sysfs、
+  `v4l2-ctl`、`axcl-smi`、raw_gadget）以板端实机验收为准。
+- 视频预览（P2）未做：取帧线程已经独占接收器节点，二次 `v4l2` 打开会失败/抢帧；
+  将来做应走固件内抽帧（`preview=y` 那条路），而不是再开一路采集。
+- NPU 占用与卡温都来自 `axcl-smi`（AXCL 运行时自带，需 root），读不到时 UI 隐藏 NPU 卡片；
+  卡温与 SoC 热区温度是两处独立读数（不同传感器），页面分别显示。

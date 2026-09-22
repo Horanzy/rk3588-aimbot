@@ -1,14 +1,18 @@
 """实例管理: 单实例状态机 + 启动序列 + 日志环 + 孤儿认领。
 
-启动序列与 game 脚本完全同构: jetson_clocks → setup_mouse.sh → bin/aimbot
+启动序列与 game 脚本完全同构: scripts/setup_platform.sh → bin/aimbot
 (全量参数, -S 指向 profile 脚本使标定回写照旧落进脚本)。命令行的中段由脚本的
 OUTPUT_MODE 决定 (hid: -D; pad/p5g: -M/-P/-T/--pad-dump), 延迟与四个倍率取本模式
 那一槽 (脚本里三套输出各占一组) —— 与脚本同一条规则, 不引入第二个事实源。
 
-权限: euid==0 (部署推荐形态: systemd root 服务) 时三步都直接执行; 否则给前两步加
-sudo 前缀 (需 NOPASSWD), aimbot 本身仍以服务身份运行 —— 它要的 /dev/raw-gadget
-权限由 setup_mouse.sh 每次 chmod 666 给出, /dev/input 则需要服务用户属于 input 组,
-否则手柄/鼠标节点一律读不到。
+平台准备脚本是幂等的: 已装好时它只回读版本就退出 (依赖 librga 本身是部署机提供的系统
+库, 见 scripts/setup_platform.sh 的文件头), 所以放在每次启动前是"验证平台前提"而不是
+重复安装; 它失败则中止启动 (缺库时固件根本起不来, 报错比拉起一个必然失败的进程有用)。
+
+权限: euid==0 (部署推荐形态: systemd root 服务) 时两步都直接执行; 否则给平台准备脚本加
+sudo 前缀 (需 NOPASSWD), aimbot 本身仍以服务身份运行 —— 它要的 /dev/raw-gadget 与 /dev/rga
+权限由部署机给出 (内核模块与节点权限是部署机自己的事, 见 AGENTS.md), /dev/input 则需要
+服务用户属于 input 组, 否则手柄/鼠标节点一律读不到。
 
 状态机: stopped → starting → running → exited (→ stopped 由下次启动覆盖)。
 异常退出 (非用户停止且退出码非 0) 置 abnormal, UI 横幅可查。
@@ -33,8 +37,12 @@ CALIB_RE = re.compile(r"\[标定\] L=([0-9.eE+-]+) ms")
 # [SAVE] fire  (fire=12 det=3 auto=1 drop=0) — 每张截图一行, 计数是固件的累计值
 SAVE_RE = re.compile(r"\[SAVE\]\s*\S+\s*\(fire=(\d+) det=(\d+) auto=(\d+)")
 STATS_RE = re.compile(r"采集统计: fire=(\d+) det=(\d+) auto=(\d+)")
-# 模型: YOLOv8/11 416x416 1类 — 启动时从固件控制台抓取, 不落存储
-MODEL_RE = re.compile(r"模型:\s*(\S+)\s+(\d+)x(\d+)(?:\s+(\d+)类)?")
+# 模型: DFL 640x640 80类 (AX650N, /path/yolo11s.axmodel, 输出 3 保留 3, 输入 U8 NHWC RGB)
+#   — 启动时从固件控制台抓取, 不落存储。前缀与 `<架构> <边长>x<边长>[ <类数>类]` 的形状是
+#   契约 (不可改); 括号里是 NPU 名 / 模型文件 / IO 契约, 缺了照常解析 (只是那几项为空)。
+MODEL_RE = re.compile(
+    r"模型:\s*(\S+)\s+(\d+)x(\d+)(?:\s+(\d+)类)?"
+    r"(?:\s*\(([^,]+),\s*([^,]+),\s*输出\s*(\d+)\s*保留\s*(\d+))?")
 # 这几类高频/低信息行不推进页面日志流 (原始环里照存, /api/logs/current 下载仍是全量);
 # [SAVE] 的信息改由截图卡片承载, [AI FPS] 由帧率卡片 + AI FPS 历史面板承载,
 # 每 60s 一行的报告率观测 ([USB-HID]/[PAD-USB], 需 SSH 看控制台) 不进页面流
@@ -43,7 +51,7 @@ FPS_HIST_MAX = 720                     # 60s 一读 → 12h 会话覆盖
 
 RUNNING_STATES = ("starting", "running", "stopping")
 
-STEP_NAMES = ("jetson_clocks 频率锁定", "raw_gadget 鼠标通道", "aimbot 进程")
+STEP_NAMES = ("平台准备 (librga)", "aimbot 进程")
 
 
 def sudo_prefix():
@@ -62,7 +70,11 @@ def build_argv(root: Path, params: dict, script_path: Path) -> list:
     输出模式决定中间那一段: hid 用 -D 选鼠标; pad/p5g 用 -M 选后端 + -P 选手柄 + -T
     触发阈值 (pad/p5g 展开一致, 只换 -M 的值), 外加可选的 --pad-dump。延迟与四个倍率
     取**本模式那一槽** (脚本里三套输出各占一组, 切模式就是整套换); 延迟缺值时省略 -l,
-    固件按默认兜底。"""
+    固件按默认兜底。
+
+    采集侧只有一项: -d <节点> (空 = 固件按驱动名解析板载 HDMI 接收器节点, 与脚本里
+    CAM_DEV 的缺省同一个语义); 帧率不是参数 (由信号决定), 类数 -n 只在模型的检测头是
+    未折叠 DFL 头时需要, 0 = 由输出属性数自解。"""
     mode = str(params.get("output_mode") or "hid")
     if mode not in discover.OUTPUT_MODES:
         mode = "hid"
@@ -72,10 +84,10 @@ def build_argv(root: Path, params: dict, script_path: Path) -> list:
     argv = [str(root / "bin" / "aimbot"),
             "-m", model_abs,
             "-c", fmt_num(params.get("class_id", 0)),
+            "-n", fmt_num(params.get("class_n", 0)),
             "-t", fmt_num(params.get("conf", 0.5)),
             "-y", fmt_num(params.get("y_offset", 65.0)),
-            "-d", str(params.get("cam_dev", "Asus")),
-            "-f", fmt_num(params.get("cam_fps", 120)),
+            "-d", str(params.get("cam_dev") or ""),
             "-x", fmt_num(params.get("max_speed", 2000.0)),
             "-S", str(script_path),
             # 拉枪速度倍率 (逐轴, 100 = 基线) — 与脚本同构地显式给出, 缺省即脚本值
@@ -251,10 +263,10 @@ class InstanceManager:
                 return False, "bin/aimbot 不存在 —— 先在「模型与运维」页编译"
             model = params.get("model")
             if not model:
-                return False, "未选择模型 engine"
+                return False, "未选择模型 (.axmodel)"
             model_abs = model if os.path.isabs(model) else str(root / model)
             if not Path(model_abs).is_file():
-                return False, "模型不存在: %s (先 convert 或重选)" % model
+                return False, "模型不存在: %s (转换后放进 engine/ 再重选)" % model
             argv = build_argv(root, params, script_path)
             self._user_stop = False
             self.state = "starting"
@@ -293,41 +305,31 @@ class InstanceManager:
 
     def _run(self, root: Path, argv: list) -> None:
         pre = sudo_prefix()
-        # ① jetson_clocks —— 失败不阻断 (与脚本行为一致, 只警示)
+        # ① setup_platform.sh —— 平台准备: 校验部署机的系统库 (librga 是部署机提供的
+        #    系统库, 本脚本幂等, 装好时只回读版本); 失败则中止, 缺库时固件起不来
         self.steps[0]["status"] = "running"
         t0 = time.time()
         if self._check_user_stop():
             return
-        rc, out = self._run_step(pre + ["jetson_clocks"], 90)
+        rc, out = self._run_step(pre + ["bash", str(root / "scripts" / "setup_platform.sh")], 180)
         self.steps[0]["ms"] = int((time.time() - t0) * 1000)
-        self.steps[0]["status"] = "ok" if rc == 0 else "warn"
-        self.steps[0]["detail"] = out[-200:] if rc == 0 else ("jetson_clocks 失败 (rc=%s), 已跳过: %s" % (rc, out[-160:]))
         if rc != 0:
-            self._append_log("⚠ jetson_clocks 失败 (rc=%s): %s" % (rc, out))
-        # ② setup_mouse.sh —— 失败则中止 (UDC 未腾空/节点缺失时起进程必然失败)
+            self.steps[0]["status"] = "fail"
+            self.steps[0]["detail"] = out[-200:]
+            self._append_log("✗ setup_platform.sh 失败 (rc=%s):\n%s" % (rc, out))
+            return self._finish_error("setup_platform.sh 失败 (rc=%s), 启动中止" % rc)
+        self.steps[0]["status"] = "ok"
+        self.steps[0]["detail"] = out[-160:]
+        # ② aimbot
         self.steps[1]["status"] = "running"
-        t0 = time.time()
-        if self._check_user_stop():
-            return
-        rc, out = self._run_step(pre + ["bash", str(root / "scripts" / "setup_mouse.sh")], 60)
-        self.steps[1]["ms"] = int((time.time() - t0) * 1000)
-        if rc != 0:
-            self.steps[1]["status"] = "fail"
-            self.steps[1]["detail"] = out[-200:]
-            self._append_log("✗ setup_mouse.sh 失败 (rc=%s):\n%s" % (rc, out))
-            return self._finish_error("setup_mouse.sh 失败 (rc=%s), 启动中止" % rc)
-        self.steps[1]["status"] = "ok"
-        self.steps[1]["detail"] = out[-160:]
-        # ③ aimbot
-        self.steps[2]["status"] = "running"
         if self._check_user_stop():
             return
         try:
             proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                     stdin=subprocess.DEVNULL, cwd=str(root))
         except OSError as e:
-            self.steps[2]["status"] = "fail"
-            self.steps[2]["detail"] = str(e)
+            self.steps[1]["status"] = "fail"
+            self.steps[1]["detail"] = str(e)
             return self._finish_error("无法启动 aimbot: %s" % e)
         with self._lock:
             self._proc = proc
@@ -356,8 +358,8 @@ class InstanceManager:
             self.error = msg
             self.ended_at = time.time()
             self.abnormal = True
-            self.steps[2]["status"] = "fail"
-            self.steps[2]["detail"] = msg
+            self.steps[1]["status"] = "fail"
+            self.steps[1]["detail"] = msg
             self._append_log("✗ " + msg)
 
     def _pump(self, proc: subprocess.Popen) -> None:
@@ -381,9 +383,14 @@ class InstanceManager:
                                        "det": int(m.group(2)), "auto": int(m.group(3))}
             m = MODEL_RE.search(line)
             if m:
+                def _s(i):
+                    return (m.group(i) or "").strip()
                 self.model_info = {"arch": m.group(1),
                                    "size": "%sx%s" % (m.group(2), m.group(3)),
-                                   "classes": int(m.group(4)) if m.group(4) else None}
+                                   "classes": int(m.group(4)) if m.group(4) else None,
+                                   "soc": _s(5), "file": _s(6),
+                                   "outputs": int(m.group(7)) if m.group(7) else None,
+                                   "kept": int(m.group(8)) if m.group(8) else None}
             m = CALIB_RE.search(line)
             if m:
                 try:
@@ -408,15 +415,15 @@ class InstanceManager:
             self.abnormal = (not self._user_stop) and rc != 0
             duration = (self.ended_at - self.started_at) if self.started_at else 0
             if self._user_stop:
-                self.steps[2]["status"] = "ok"
-                self.steps[2]["detail"] = "用户停止 (退出码 %s)" % rc
+                self.steps[1]["status"] = "ok"
+                self.steps[1]["detail"] = "用户停止 (退出码 %s)" % rc
             elif rc == 0:
-                self.steps[2]["status"] = "ok"
-                self.steps[2]["detail"] = "正常退出"
+                self.steps[1]["status"] = "ok"
+                self.steps[1]["detail"] = "正常退出"
             else:
-                self.steps[2]["status"] = "fail"
+                self.steps[1]["status"] = "fail"
                 sig = (" (信号 %s)" % self.exit_signal) if self.exit_signal else ""
-                self.steps[2]["detail"] = "异常退出: rc=%s%s" % (rc, sig)
+                self.steps[1]["detail"] = "异常退出: rc=%s%s" % (rc, sig)
             self._push_history({
                 "ts": self.ended_at, "profile": self.profile,
                 "display_name": self.display_name,

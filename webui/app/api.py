@@ -417,11 +417,11 @@ def api_capture_count(profile: str = ""):
 @app.post("/api/tasks")
 def api_task_start(body: dict):
     kind = (body or {}).get("kind")
-    if kind not in ("convert", "compile"):
-        raise HTTPException(400, "kind 须为 convert 或 compile")
+    if kind != "compile":
+        raise HTTPException(400, "kind 须为 compile (模型转换在本仓库之外完成)")
     script = S.root() / "scripts" / (kind + ".sh")
     block = None
-    if kind == "compile" and S.inst.snapshot()["state"] in proc.RUNNING_STATES:
+    if S.inst.snapshot()["state"] in proc.RUNNING_STATES:
         block = ("实例正在运行: 运行中的 bin/aimbot 无法被覆盖 (text file busy)。"
                  "先【停止】实例再编译。")
     tid, err = S.op.start(kind, script, block)
@@ -507,4 +507,4 @@ def _startup():
         S.inst.adopt(S.root(), S.cfg["hot_port"])
     except Exception:
         pass
-    telemetry.start_tegrastats()
+    telemetry.start_npu_poller()

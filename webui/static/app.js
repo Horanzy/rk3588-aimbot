@@ -139,8 +139,10 @@ const PARAM_DEFS = [
     info: "手柄扳机 (RT/LT 两键共享) 的自瞄触发门槛, 按满量程百分比。它只门控「自瞄认为扳机按下了没有」, 再与 -k 的 fire/ads/both 语义一起决定开火/开镜; 扳机模拟量本身 1:1 透传给游戏, 不过阈值也不 reshape。默认 6 = 该手柄扳机实测 flat 15/255 的上取整 (低于它的读数只在噪声里抖)。手柄换型后按新 flat 调。🔥 热参数 (padthr), 保存即生效。" },
   { group: "输出模式与设备", key: "pad_dump", label: "合并态调试输出 --pad-dump", type: "bool", hot: false, showIfMode: ["pad", "p5g"],
     info: "开启后每 ≥50ms 在日志打一行合并后的逻辑态 (rx/ry = 人手 + 注入, 带 fire/ads/aim_gate)。这是分辨「注入没到游戏」还是「律根本没下命令」的唯一手段; 标定期打印的就是激励波形。只想正常玩时关掉。❄ 冷参数, 下次启动生效。" },
-  { group: "瞄准", key: "model", label: "模型 engine", type: "engine", hot: false,
-    info: "TensorRT engine 模型 (engine/ 下选择)。engine 与本机 GPU/TRT 版本绑定, 换机或升级 TRT 后需重新 convert; onnx 比对应 engine 新时「模型与运维」页会提示过期。冷参数, 下次启动生效。" },
+  { group: "瞄准", key: "model", label: "模型 axmodel", type: "model", hot: false,
+    info: "AX 模型 (.axmodel, engine/ 下选择)。模型的转换在本仓库之外完成 (AX 工具链), 换芯片或换 AXCL 运行时版本后需重新转一次, 转好的文件放进 engine/ 即出现在此下拉。冷参数, 下次启动生效。" },
+  { group: "瞄准", key: "class_n", label: "模型类数 -n", type: "num", min: 0, max: 1000, step: 1, hot: false,
+    info: "模型输出的类数。0 = 由输出属性数自解 (网格头), 公开 YOLO11 这类未折叠 DFL 头**必须给** (80): 该头的属性数 = 4·reg_max + 类数, 而 reg_max 不是可观测量, 缺它时那路输出不解码 (只解码网格头)。❄ 冷参数, 下次启动生效。" },
   { group: "瞄准", key: "conf", label: "置信度阈值", type: "num", min: 0, max: 1, step: 0.01, hot: true,
     info: "检测框采纳门槛 (0–1)。调低: 更远/遮挡/侧面目标也会被锁定, 误检与抢锁风险上升; 调高: 只锁高置信目标, 残局可能丢锁。🔥 热参数, 保存即下发运行中实例。" },
   { group: "瞄准", key: "y_offset", label: "瞄准高度偏移", type: "num", min: 0, max: 100, step: 1, unit: "%", hot: true,
@@ -153,18 +155,16 @@ const PARAM_DEFS = [
   { group: "瞄准", key: "aim_enabled", label: "鼠标接管", type: "bool", hot: true,
     info: "关闭后固件只透传真实鼠标, 不注入任何移动; 检测与采集照常运行 —— 模型未完善、只想采数据时的形态, 随时可再打开恢复控制输出。🔥 热参数, 保存即生效。" },
   { group: "瞄准", key: "fov", label: "FOV 半径", type: "num", min: 10, max: 1000, step: 5, unit: "px", hot: true,
-    info: "FOV 同时是目标筛选圈与积分器启动边界 (一值两用)。几何关系: 模型输入是 1080p 画面中心裁剪出的 640×640, 模型像素与屏幕像素 1:1, 检测范围为以准星为中心 ±320px (对角约 452px), 因此调到 452 以上没有额外效果。调大: 更远/更偏的目标进入筛选圈, 多目标抢锁风险上升; 调小: 只锁准星附近。🔥 热参数, 保存即生效。" },
+    info: "FOV 同时是目标筛选圈与积分器启动边界 (一值两用)。几何关系: 规范窗口是采集帧中心 1:1 裁剪出的 640×640, 模型输入更小时看到的是它再中心 1:1 裁一次, 所以模型像素与屏幕像素 1:1, 检测范围为以准星为中心 ±320px (对角约 452px), 调到 452 以上没有额外效果。调大: 更远/更偏的目标进入筛选圈, 多目标抢锁风险上升; 调小: 只锁准星附近。🔥 热参数, 保存即生效。" },
   // 三套输出各占一组 5 个值 (延迟 1 + 拉枪倍率 4): 由 MODE_SLOT 生成 —— 切换【输出模式】
   // 显示/编辑的就是本槽那一组, 保存也只提交本槽 (见 savePatch)
   ...modeSlotRows(),
   { group: "瞄准", key: "class_id", label: "目标类别 ID", type: "num", min: 0, max: 255, step: 1, hot: false,
     info: "锁定哪个检测类别 (依模型标签, 如 0=头, 1=身)。❄ 冷参数, 下次启动生效。" },
-  { group: "瞄准", key: "cam_fps", label: "采集帧率", type: "select", options: [120, 60], hot: false,
-    info: "采集卡帧率。控制律增益按实测帧周期归一, 手感不随帧率变化; 60fps 省带宽但延迟滤波更钝。❄ 冷参数, 下次启动生效。" },
-  { group: "瞄准", key: "cam_dev", label: "采集卡", type: "camera", hot: false,
-    info: "采集卡设备。Hagibis/Asus 是按 /dev/v4l/by-id 名字做唯一子串匹配的别名 (与固件同一规则); /dev/videoN 是具体节点。插拔设备后到设置页重新扫描。❄ 冷参数, 下次启动生效。" },
+  { group: "瞄准", key: "cam_dev", label: "HDMI IN 采集节点 -d", type: "hdmi", hot: false,
+    info: "板载 HDMI 接收器节点 (/dev/videoN), 下拉里带现场信号状态 (锁定与否/分辨率/刷新率/像素格式)。留空 = 固件按驱动名 rk_hdmirx 自己解析节点 (节点号跨重启会变, 所以这是默认形态; 只有一个接收器, 一般不需要手选)。接收器没有信号锁定时固件起不来, 启动前看这里的『已锁定』。帧率不在参数面上 —— 采集率由信号决定, 检测率见日志 [AI FPS] 行。❄ 冷参数, 下次启动生效。" },
   { group: "瞄准", key: "preview", label: "预览窗口", type: "bool", hot: false,
-    info: "在 Jetson 接屏幕/桌面会话时显示检测画面 (框选 + 瞄准点)。没有接屏时开启会导致启动报错 —— 日志会如实显示, 改回关闭再启动即可。❄ 冷参数, 下次启动生效。" },
+    info: "在板端接屏幕/桌面会话时显示检测画面 (框选 + 瞄准点)。没有接屏时开启会导致启动报错 —— 日志会如实显示, 改回关闭再启动即可。❄ 冷参数, 下次启动生效。" },
   { group: "训练数据采集", key: "capture_enabled", label: "开启采集", type: "bool", hot: false, captureSwitch: true,
     info: "开启后按三源自动截图: 开火瞬间 (fire) / 检测到目标 (det) / 定时 (auto), 分别写入输出目录的子目录, 每个源可单独开关。关闭 = 纯自瞄, 不写盘。❄ 冷参数, 下次启动生效。" },
   { group: "训练数据采集", key: "cap_fire", label: "开火源 fire", type: "bool", hot: true, showIf: "capture_enabled",
@@ -355,8 +355,10 @@ function renderTopbar() {
   if (inst.fps != null) chips.push(`<span class="chip accent">FPS <b>${inst.fps}</b></span>`);
   if (tel) {
     if (tel.cpu != null) chips.push(`<span class="chip">CPU <b>${tel.cpu}%</b></span>`);
-    if (tel.gpu != null) chips.push(`<span class="chip">GPU <b>${tel.gpu}%</b></span>`);
+    if (tel.npu != null) chips.push(`<span class="chip">NPU <b>${tel.npu}%</b></span>`);
     if (tel.mem) chips.push(`<span class="chip">内存 <b>${tel.mem.percent}%</b></span>`);
+    if (tel.npu_temp != null)
+      chips.push(`<span class="chip" title="${esc((tel.npu_card && tel.npu_card.name) || "AX 加速卡")}">NPU 温度 <b>${tel.npu_temp}°C</b></span>`);
     if (tel.soc_temp != null) {
       const cls = tel.soc_temp >= 85 ? "err" : tel.soc_temp >= 70 ? "warn" : "";
       chips.push(`<span class="chip ${cls}">SoC <b>${tel.soc_temp.toFixed(0)}°C</b></span>`);
@@ -436,13 +438,20 @@ function renderRunTab() {
     { k: "输出模式", v: esc(mode), small: mode === "hid" ? "-D 选鼠标" : "-P/-T 选手柄",
       t: MODE_LABEL[mode] || mode },
     { k: "模型 (选中)", v: esc(model) },
-    { k: "模型架构", v: mi ? esc(mi.arch) : "—", small: mi && mi.classes != null ? mi.classes + " 类" : "", t: "每次启动从固件控制台输出抓取; v8 与 v11 在输出层不可区分, 固件打印 YOLOv8/11" },
+    { k: "模型架构", v: mi ? esc(mi.arch) : "—", small: mi && mi.classes != null ? mi.classes + " 类" : "",
+      t: mi ? "每次启动从固件控制台输出抓取" + (mi.file ? "; 运行中: " + mi.file : "") +
+              (mi.soc ? " (NPU " + mi.soc + ")" : "") +
+              (mi.outputs != null ? "; 输出张量 " + mi.outputs + " 保留 " + mi.kept : "")
+            : "每次启动从固件控制台输出抓取 (架构是单 token, 如 DFL/YOLOv8 等)" },
     { k: "输入尺寸", v: mi ? mi.size : "—", small: mi ? "px" : "", t: "模型输入分辨率, 每次启动从固件控制台输出抓取" },
     { k: "帧率 (自动识别)", v: inst.fps != null ? inst.fps : "—", small: "fps", cls: inst.fps >= 100 ? "ok" : (inst.fps != null ? "warn" : "") },
     { k: "截图 本次", v: capTotal != null ? capTotal : "—", small: capSmall, t: "本次运行固件累计截图; 重新【启动】归零" },
     { k: "截图 文件夹", v: S.capFolder != null ? S.capFolder : "—", small: S.capFolderName || "输出目录", t: S.capDir || "输出目录内全部截图 (10s 刷新)" },
     { k: "CPU", v: tel && tel.cpu != null ? tel.cpu : "—", small: "%" },
-    { k: "GPU", v: tel && tel.gpu != null ? tel.gpu : "—", small: "%" },
+    { k: "NPU", v: tel && tel.npu != null ? tel.npu : "—", small: "%",
+      t: "AX 加速卡的 NPU 占用 (axcl-smi 每 2s 一读)" },
+    { k: "NPU 温度", v: tel && tel.npu_temp != null ? tel.npu_temp : "—", small: "°C",
+      t: tel && tel.npu_card ? tel.npu_card.name + " (axcl-smi 读数)" : "AX 加速卡温度" },
     { k: "内存", v: tel && tel.mem ? tel.mem.percent : "—", small: tel && tel.mem ? "· " + tel.mem.used_mb + "MB" : "" },
     { k: "SoC 温度", v: soc != null ? soc.toFixed(0) : "—", small: "°C", cls: soc >= 85 ? "err" : soc >= 70 ? "warn" : "" },
     { k: "标定延迟 L (" + esc(lVar) + ")", v: calib ? calib.l : "—",
@@ -600,12 +609,13 @@ function paramRow(d) {
     ctl = `<input type="text" data-pk="${d.key}" value="${esc(v == null ? "" : v)}" spellcheck="false" placeholder="留空 = 任意设备 (取字典序首个)">`;
   } else if (d.type === "bool") {
     ctl = `<label class="switch"><input type="checkbox" data-pk="${d.key}"${v ? " checked" : ""}><span class="tr"></span></label>`;
-  } else if (d.type === "engine") {
-    const engs = (S.state.scan.engines || []).map(e => e.path);
-    ctl = dynSelect(d.key, v, engs.map(p => ({ v: p, t: p })), "先去 convert");
-  } else if (d.type === "camera") {
-    const cams = (S.state.scan.cameras || []).map(c => ({ v: c.value, t: c.label }));
-    ctl = dynSelect(d.key, v, cams, "未发现采集卡");
+  } else if (d.type === "model") {
+    const models = (S.state.scan.models || []).map(e => e.path);
+    ctl = dynSelect(d.key, v, models.map(p => ({ v: p, t: p })), "engine/ 下还没有 .axmodel");
+  } else if (d.type === "hdmi") {
+    const cams = (S.state.scan.hdmi_in || []).map(c => ({ v: c.node, t: c.label }));
+    // 留空 = 固件按驱动名解析接收器 (节点号跨重启会变, 所以这是默认形态)
+    ctl = dynSelect(d.key, v, cams, "未发现 HDMI 接收器");
   } else if (d.type === "dataset") {
     const dirs = (S.state.scan.dataset_dirs || []).map(n => ({ v: "dataset/" + n, t: "dataset/" + n }));
     dirs.unshift({ v: "dataset/" + (S.selected || "game"), t: "dataset/" + (S.selected || "game") + " (建议)" });
@@ -729,7 +739,7 @@ async function startInstance() {
       Notification.requestPermission();     // 异常退出桌面通知, 用户手势里申请
     }
     await api("/api/instance/start", { method: "POST", body: { profile: S.selected } });
-    toast("启动序列已开始 (jetson_clocks → 鼠标 → aimbot), 看下方步骤与日志", "ok");
+    toast("启动序列已开始 (平台准备 → aimbot), 看下方步骤与日志", "ok");
     showTab("run");
     pollCapFolder();
   } catch (e) { toast("启动失败: " + e.message, "err"); }
@@ -758,22 +768,17 @@ async function triggerCalib() {
 function renderOps() {
   const scan = S.state.scan;
   // 文件列表只在 scan 变化时重建 (每 tick 重建会浪费 DOM 并打断滚动)
-  const sig = JSON.stringify([scan.engines, scan.onnx, S.params && S.params.model]);
+  const sig = JSON.stringify([scan.models, S.params && S.params.model]);
   if (S._opsSig !== sig) {
     S._opsSig = sig;
-    const engs = scan.engines || [];
-    const onnx = scan.onnx || [];
-    $("#engineList").innerHTML = engs.length ? engs.map(e =>
+    const models = scan.models || [];
+    $("#modelCount").textContent = models.length ? models.length + " 个模型" : "";
+    $("#modelList").innerHTML = models.length ? models.map(e =>
       `<div class="frow"><span class="f-name">${esc(e.path)}</span>
         <span class="f-right"><span class="f-meta">${fmtSize(e.size)} · ${fmtDate(e.mtime)}</span>
         ${String(S.params && S.params.model) === e.path ? '<span class="badge okb">当前选中</span>' : ""}
-        <button class="btn small" data-use-engine="${esc(e.path)}">选用</button></span></div>`).join("")
-      : `<div class="empty">engine/ 下没有模型 — 用右侧 onnx 列表旁的「转换」生成</div>`;
-    $("#onnxList").innerHTML = onnx.length ? onnx.map(o =>
-      `<div class="frow"><span class="f-name">${esc(o.path)}</span>
-        <span class="f-right"><span class="f-meta">${fmtSize(o.size)} · ${fmtDate(o.mtime)}</span>
-        ${o.engine ? (o.stale ? '<span class="badge stale">engine 过期</span>' : '<span class="badge okb">已转换</span>') : '<span class="badge">未转换</span>'}</span></div>`).join("")
-      : `<div class="empty">onnx/ 下没有模型文件</div>`;
+        <button class="btn small" data-use-model="${esc(e.path)}">选用</button></span></div>`).join("")
+      : `<div class="empty">engine/ 下没有 .axmodel — 转换在仓库外完成, 转好后放进 engine/</div>`;
   }
 
   const running = RUNNING.includes(S.state.instance.state);
@@ -826,7 +831,7 @@ function renderTasks() {
 function updateTaskEl(t, el) {
   el = el || $(`[data-task="${t.id}"]`);
   if (!el) return;
-  el.querySelector(".t-kind").textContent = t.kind === "convert" ? "convert 模型转换" : "compile 编译";
+  el.querySelector(".t-kind").textContent = "compile 编译";
   const st = el.querySelector(".t-status");
   st.textContent = { running: "● 运行中", ok: "✓ 成功", failed: "✗ 失败" }[t.status] || t.status;
   st.className = "t-status " + t.status;
@@ -865,11 +870,17 @@ function renderSettings() {
   $("#pwState").textContent = cfg.has_password
     ? "已设置密码 (其它浏览器忘记密码时, 仍可用上面的 token 登录)"
     : "未设置 — 首次打开页面时会要求凭 token 设置密码";
-  $("#svcHint").textContent = (cfg.is_root ? "服务以 root 运行 ✓ " : "服务不是 root — jetson_clocks/USB 初始化/启动会失败, 见 webui/README.md ") +
+  $("#svcHint").textContent = (cfg.is_root ? "服务以 root 运行 ✓ " : "服务不是 root — 平台准备/固件启动/USB 通道都会失败, 见 webui/README.md ") +
     "· 热参数端口 127.0.0.1:" + cfg.hot_port + " · 修改监听/端口后需重启服务 (sudo systemctl restart aimbot-webui)";
   const lines = [];
   if (scan.status === "ok") {
-    lines.push(`<div class="scan-line">✅ 发现: <b>${scan.profiles.length}</b> 个游戏 profile · <b>${scan.engines.length}</b> 个 engine · <b>${scan.onnx.length}</b> 个 onnx · <b>${scan.cameras.length}</b> 个采集设备 · dataset 子目录 <b>${scan.dataset_dirs.length}</b> 个</div>`);
+    const hdmi = (scan.hdmi_in || [])[0];
+    lines.push(`<div class="scan-line">✅ 发现: <b>${scan.profiles.length}</b> 个游戏 profile · <b>${scan.models.length}</b> 个 axmodel · dataset 子目录 <b>${scan.dataset_dirs.length}</b> 个</div>`);
+    lines.push(`<div class="scan-line">HDMI 接收器: ${hdmi
+      ? (hdmi.locked
+          ? `✅ <b>${esc(hdmi.node)}</b> · 已锁定 <b>${hdmi.width}×${hdmi.height}</b> @${hdmi.fps.toFixed(2)} Hz · ${esc(hdmi.pixel_format)} (${esc(hdmi.driver)})`
+          : `⚠ <b>${esc(hdmi.node)}</b> · <b>${esc(hdmi.status || "无信号")}</b>${hdmi.ok ? "" : " (" + esc(hdmi.error) + ")"}`)
+      : "✗ 未发现 (扫 /sys/class/video4linux/video*/name 里含 hdmirx 的节点)"}</div>`);
     lines.push(`<div class="scan-line">bin/aimbot: ${scan.binary.exists ? "存在 (" + fmtSize(scan.binary.size) + ", " + fmtDate(scan.binary.mtime) + ")" : "不存在"} · 热参数支持: ${scan.binary.hot_capable ? "是" : "否 (旧版, 建议重编译)"}</div>`);
     (scan.warnings || []).forEach(w => lines.push(`<div class="scan-warn">⚠ ${esc(w)}</div>`));
   } else {
@@ -1023,21 +1034,17 @@ function bindEvents() {
     info.style.display = open ? "block" : "none";
     if (open) S.openInfo.add(key); else S.openInfo.delete(key);
   });
-  // 选用 engine
-  $("#engineList").addEventListener("click", e => {
-    const b = e.target.closest("[data-use-engine]");
+  // 选用模型
+  $("#modelList").addEventListener("click", e => {
+    const b = e.target.closest("[data-use-model]");
     if (!b) return;
-    S.params.model = b.dataset.useEngine;
+    S.params.model = b.dataset.useModel;
     markDirty();
     renderParams();
-    toast("已选用 " + b.dataset.useEngine + " — 记得点【保存】(或直接【启动】, 会先保存)", "");
+    toast("已选用 " + b.dataset.useModel + " — 记得点【保存】(或直接【启动】, 会先保存)", "");
   });
 
   // 运维按钮
-  $("#btnConvert").addEventListener("click", async () => {
-    try { await api("/api/tasks", { method: "POST", body: { kind: "convert" } }); toast("convert 任务已开始, 日志见下", "ok"); renderOps(); }
-    catch (e) { toast("convert 启动失败: " + e.message, "err"); }
-  });
   $("#btnCompile").addEventListener("click", async () => {
     try { await api("/api/tasks", { method: "POST", body: { kind: "compile" } }); toast("compile 任务已开始", "ok"); renderOps(); }
     catch (e) { toast("compile 启动失败: " + e.message, "err"); }
