@@ -183,6 +183,11 @@ python3 -m venv .venv && .venv/bin/python -m pip install -r requirements.txt
   平台准备脚本幂等（装好时只回读版本后退出），失败则中止并把 stderr 显示出来 —— 缺 `librga`
   时固件根本起不来，拉起一个必然失败的进程没有意义。
   “重启” = 再点一次【启动】。
+- 启动命令行与 game 脚本逐项同构，只多一层 `stdbuf -oL -eL` 前缀：固件的正常日志走
+  `std::cout`，在管道里是块缓冲（4KB 或进程退出才出），页面就只剩 stderr 的错误行；
+  行缓冲后「模型:」「[AI FPS]」「[热参]」随写随到 —— 手动 SSH 时终端（tty）本就给这一份。
+  `stdbuf` 不在时退回直接执行（行为退化成"退出时才见日志"，但绝不因此起不来）；
+  包装不换 pid 也不换 exe（`stdbuf` 设 `LD_PRELOAD` 后 exec 目标），孤儿认领的匹配照旧成立。
 - **【保存】**只持久化。有未保存改动时按钮高亮、切页/切 profile 提示。
 - **孤儿认领**：WebUI 自身重启时扫描已存活的 aimbot 并认领为 running（认领实例无日志，
   可停止/接管），绝不把存活实例显示成“已停止”诱导双开。

@@ -321,7 +321,7 @@ def api_instance_cmd(profile: str):
         raise HTTPException(404, "未知的游戏 profile: %s" % profile)
     argv = proc.build_argv(S.root(), p["script_params"],
                            S.root() / "scripts" / "game" / (profile + ".sh"))
-    return {"cmd": proc.cmd_string(argv)}
+    return {"cmd": proc.cmd_string(proc.wrapped_argv(argv))}
 
 
 @app.post("/api/instance/start")

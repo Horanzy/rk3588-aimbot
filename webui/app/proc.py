@@ -22,6 +22,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import signal
 import subprocess
 import threading
@@ -30,6 +31,13 @@ from collections import deque
 from pathlib import Path
 
 from . import discover
+
+# stdout 走管道时 C++ 的 std::cout 是**块缓冲** (4KB 或进程退出才出): 页面就只能看到
+# 走 stderr 的错误行, 正常行 (✅ 热参数通道 / 模型: / [AI FPS] / [热参]) 全都等到退出
+# 才一次到达 —— 运行中的实例等于没有活日志。stdbuf -oL 把它改成行缓冲, 等价于手动
+# SSH 时终端给的那一份 (tty 本来就是行缓冲), 于是日志随写随到。
+# 缺 stdbuf 的极简系统上退回直接执行: 行为退化成"退出时才见日志", 但绝不因此起不来。
+STDBUF = ("stdbuf", "-oL", "-eL")
 
 HANDSHAKE_RE = re.compile(r"热参数通道: 127\.0\.0\.1:(\d+)")
 FPS_RE = re.compile(r"\[AI FPS\] (\d+) fps")
@@ -126,6 +134,14 @@ def build_argv(root: Path, params: dict, script_path: Path) -> list:
 
 def cmd_string(argv: list) -> str:
     return " ".join(shlex.quote(a) for a in argv)
+
+
+def wrapped_argv(argv: list) -> list:
+    """行缓冲包装 (见 STDBUF 的理由); 命令本身不变 —— 包装只是给它一个行缓冲的 stdout。
+
+    进程仍是同一个 pid 与同一个 exe (stdbuf 设置 LD_PRELOAD 后 exec 目标), 所以
+    孤儿认领的 /proc/*/exe 精确匹配照旧成立。"""
+    return list(STDBUF) + list(argv) if shutil.which(STDBUF[0]) else list(argv)
 
 
 def find_aimbot_pids(bin_path: str) -> list:
@@ -287,7 +303,7 @@ class InstanceManager:
             self.steps = [{"name": n, "status": "pending", "detail": "", "ms": 0}
                           for n in STEP_NAMES]
             self._append_log("════ 启动 %s (%s) ════" % (display_name, profile))
-            self._append_log("$ " + cmd_string(argv))
+            self._append_log("$ " + cmd_string(wrapped_argv(argv)))
         threading.Thread(target=self._run, args=(root, argv), daemon=True).start()
         return True, ""
 
@@ -325,7 +341,8 @@ class InstanceManager:
         if self._check_user_stop():
             return
         try:
-            proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            proc = subprocess.Popen(wrapped_argv(argv), stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT,
                                     stdin=subprocess.DEVNULL, cwd=str(root))
         except OSError as e:
             self.steps[1]["status"] = "fail"
