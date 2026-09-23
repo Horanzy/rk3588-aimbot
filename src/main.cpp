@@ -144,7 +144,7 @@ int main(int argc, char* argv[]) {
                 "  -t <阈值>  置信度     -y <偏移> 部位\n"
                 "  -d <节点>  采集设备: /dev/videoN (缺省 = 按驱动名解析接收器节点)\n"
                 "  -x <速度>  最大px/s\n"
-                "  -l <L>     初始环路延迟 (完整回路: 含标定跳过的那条推理腿; 标定回写的就是它)\n"
+                "  -l <L>     初始环路延迟 (标定出的物理环路延迟; 标定回写与运行态生效的就是它)\n"
                 "  -S <脚本>  回写路径 (标定只写本输出模式的延迟 VAR:\n"
                 "             hid → HID_L_EST, pad → PAD_L_EST, p5g → P5G_L_EST)\n"
                 "  -k <键>   fire/ads/both  -v <y/n> 预览\n"

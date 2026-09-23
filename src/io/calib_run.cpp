@@ -507,12 +507,13 @@ void cal_print_diag(CalMode mode, const CalResult& r, size_t hist_n) {
                (r.l_axis_n[0] && r.l_axis_n[1]) ? "" : " (只一轴出读数)");
     if (r.err[0]) printf("[标定] 无法测量: %s (样本 %zu)\n", r.err, hist_n);
     else if (r.used_edges)
-        printf("[标定] L=%.1f ms (物理环路延迟: 尾迹族不可用, 取停止沿族中位) — 只标延迟; "
-               "速度不回写 (手感走 spdx/spdy); 完整环路延迟 = 本值 + 推理段均值 (采集侧紧随其后"
-               "报出)\n", (double)r.l_est);
+        printf("[标定] L=%.1f ms (物理环路延迟: 尾迹族不可用, 取停止沿族中位) — 只标延迟, "
+               "速度不回写 (手感走 spdx/spdy); 这就是回写与运行态生效的值 (律的锚点是帧交付"
+               "时刻, 其后的推理段由 age 承载, 不进 L)\n", (double)r.l_est);
     else
-        printf("[标定] L=%.1f ms (物理环路延迟: 尾迹族中位; 三读数见上) — 只标延迟; 速度不回写 "
-               "(手感走 spdx/spdy); 完整环路延迟 = 本值 + 推理段均值 (采集侧紧随其后报出)\n",
+        printf("[标定] L=%.1f ms (物理环路延迟: 尾迹族中位; 三读数见上) — 只标延迟, 速度不回写 "
+               "(手感走 spdx/spdy); 这就是回写与运行态生效的值 (律的锚点是帧交付时刻, 其后的"
+               "推理段由 age 承载, 不进 L)\n",
                (double)r.l_est);
     fflush(stdout);
 }

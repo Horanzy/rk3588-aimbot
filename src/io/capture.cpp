@@ -298,12 +298,15 @@ void ai_thread(std::string model_path, int target_cls, int num_classes,
     std::vector<double> ages;               // 本窗口的帧龄 (帧时间戳 → 检测就绪, ms)
     auto fps_t0 = std::chrono::steady_clock::now();
 
-    // 推理段 (打包 + H2D + exec + D2H + 解码 — [AI FPS] 行报的那一段) 的逐帧累计: 标定的
-    //   三个读数量的都是**物理环路延迟**, 而标定整轮**跳过推理**, 于是这一腿不在它的测量
-    //   里; 回路里它确实在 (律看到的是解码后的框), 所以回写的环路延迟 = 物理 L + 这段均值。
+    // 推理段 (H2D + exec + D2H + 解码 — [AI FPS] 行报的那一段) 的逐帧累计: 律的时间戳锚点是
+    //   **帧交付时刻** (wait_frame 返回处取的 now), 该时刻之后的这段处理由律的 age 与
+    //   gap_scale 在每一拍里承载 —— 再加进 L 就是把同一段算两遍: 实测 640 模型 (推理段
+    //   6.39ms) 下信念从 50ms 抬到 56.4ms, arena 匹配档 composite 114.66 → 129.11 (复现命令
+    //   arena.eval ff_pi_acc 56.4)。它因此是**诊断量**: 报在 [AI FPS] 行里, 既不回写也不进
+    //   运行态。
     //   **只累计走完整条链的帧** (标定期一帧都不计, 否则把"被跳过的腿"算进自己的均值), 帧
-    //   数随均值一起报出。取帧与 RGA 不做这个加法: 标定那轮照付这两腿 (它自己也要取帧、
-    //   也要裁一次 640 窗口), 只有推理是它真正跳过的一腿。
+    //   数随均值一起报出。取帧与 RGA 不进这段: 标定那轮照付这两腿 (它自己也要取帧、也要裁
+    //   一次 640 窗口), 它们本来就在标定的读数里。
     //   段成本是模型自己的属性 (输入边长与保留输出定了就不再变), 故整轮平均即可, 不按
     //   源模式重置 (源模式变的是 RGA 的活, 不是这段)。
     double inf_us_sum = 0.0;
@@ -427,7 +430,7 @@ void ai_thread(std::string model_path, int target_cls, int num_classes,
             sum_h2d += tick.npu.h2d_us;
             sum_exec += tick.npu.exec_us; sum_d2h += tick.npu.d2h_us;
             sum_dec += tick.npu.decode_us;
-            inf_us_sum += tick.npu.total_us();      // 标定回写要加的那一腿 (见上面的说明)
+            inf_us_sum += tick.npu.total_us();      // 推理段累计 (诊断: 不进 L, 见上面的说明)
             ++inf_n;
             sum_wait += 1000.0 * (double)wait_ms;
             sum_fence += in.last_fence_wait_us();
@@ -449,8 +452,8 @@ void ai_thread(std::string model_path, int target_cls, int num_classes,
                        "%.2f 解码 %.2f) | 合计 %.2fms/帧 | 帧龄(帧时间戳→检测就绪) p50 %.1f "
                        "p99 %.1f max %.1fms | 等 fence %llu 次 (成功 %llu 次 均值 %.2fms) | "
                        "超时 %llu 次 (白等 %llu×%dms) | 失锁 %llu 次 停流 %llu 次 | 重建 "
-                       "%llu 成功 %llu 失败 | 推理段累计均值 %.2fms (%ld 帧 — 标定回写要加的"
-                       "那一腿)\n",
+                       "%llu 成功 %llu 失败 | 推理段累计均值 %.2fms (%ld 帧 — 诊断: 律的锚点"
+                       "是帧交付时刻, 其后的处理由 age 承载, 不进 L)\n",
                        (int)((double)fps_cnt / win_s), src_hz, win_s, sum_wait / n,
                        sum_fence / n, sum_rga / n, sum_npu / n, sum_h2d / n,
                        sum_exec / n, sum_d2h / n, sum_dec / n,
@@ -545,9 +548,9 @@ void ai_thread(std::string model_path, int target_cls, int num_classes,
                 // 回写与运行态生效的都是**标定量的物理环路延迟**。律的时间戳锚点是帧交付
                 //   时刻 (wait_frame 返回处取的 now), 该时刻之后的 RGA 与推理处理由 age 与
                 //   gap_scale 在每一拍里承载 —— 把它再加进 L 就是把同一段算两遍: 实测 640
-                //   模型 (推理段 6.39ms) 下信念被抬高 11%, arena 匹配档 composite
-                //   114.66 → 129.11, 违反"匹配档不得上升"。推理段均值仍在 [AI FPS] 行里报,
-                //   它现在是诊断量, 不参与任何计算。
+                //   模型 (推理段 6.39ms) 下信念从 50ms 抬到 56.4ms, arena 匹配档 composite
+                //   114.66 → 129.11 (复现命令 arena.eval ff_pi_acc 56.4), 违反"匹配档不得
+                //   上升"。推理段均值仍在 [AI FPS] 行里报, 它现在是诊断量, 不参与任何计算。
                 const double inf_ms = inf_n ? inf_us_sum / (double)inf_n / 1000.0 : 0.0;
                 const float  l_write = cr.l_est;
                 // 行内同样写 L=: 面板的延迟卡片取的就是这条 (它显示"在用的那一格"),

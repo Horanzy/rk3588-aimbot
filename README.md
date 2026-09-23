@@ -54,11 +54,15 @@ seconds (the gamepad modes: L3+R3, or the panel's 「开始标定」 button). Th
 axis, alternating deflections that stop the moment the picture has travelled far enough, each followed by
 a quiet pause — measures the background motion with block phase correlation, and estimates the **physical
 loop delay `L` (ms)**, the one calibrated quantity, from three independent readings of that same observation
-stream (a sub-frame-exact tail sum plus two frame-quantized edges). The round skips the inference chain, so
-the leg it genuinely bypasses (pack + H2D + exec + D2H + decode, the segment the `[AI FPS]` line reports) is
-accumulated from ordinary frames and **added** on the way out, while the legs the round pays itself — waiting
-for a frame's payload and the RGA crop — are not added again; the written value is therefore the whole loop
-delay, and the round's log states all three numbers. Success is a nod and writes back that output mode's
+stream (a sub-frame-exact tail sum plus two frame-quantized edges). That value is the **physical** loop delay,
+and it is exactly what is written back and what the running law uses: the law's timestamp anchor is the
+frame-delivery instant, so everything the pipeline does after it (RGA, the NPU tick, the decode) is already
+carried by the law's detection age — adding it to `L` would count the same interval twice (measured on the 640
+model: a belief of 56.4 ms instead of 50 puts `arena.eval ff_pi_acc 56.4`'s matched composite at 129.11 against
+the shipped 114.66). The round skips the inference chain, so the leg it bypasses (H2D + exec + D2H + decode,
+the segment the `[AI FPS]` line reports) is accumulated from ordinary frames and printed beside `L` as a
+diagnostic only; the legs the round pays itself — waiting for a frame's payload and the RGA crop — are not
+added either, since every reading already contains them. Success is a nod and writes back that output mode's
 delay VAR (`HID_L_EST` for hid, `PAD_L_EST` for pad, `P5G_L_EST` for p5g) into the per-game launch script; a
 failure is a shake that writes nothing and states its reason and evidence in the log. The
 control-law bandwidth is then derived from `L` via phase margin (`wn=(90°−PM)π/180/L`, PM=50°) and the
@@ -124,7 +128,7 @@ reads the guard's effective value, not its literal text.
 | `PAD_KEYWORD` | `-P` | pad/p5g: gamepad match substring (empty = any `*-event-joystick`; the dongle's own node is excluded) |
 | `PAD_TRIG_THR` | `-T` | pad/p5g: trigger threshold in % of full scale, shared by RT and LT; it gates the aim-trigger decision only — the analog value passes through 1:1 (hot param `padthr`) |
 | `PAD_DUMP` | `--pad-dump` | pad/p5g: log the merged logical state every ≥50 ms (injection debugging) |
-| `HID_L_EST` / `PAD_L_EST` / `P5G_L_EST` | `-l` | the calibrated **complete** loop delay (the round's physical reading plus the averaged inference leg; the frame-wait and RGA legs the round pays itself are not added), **one slot per output mode** — the only quantity the firmware ever writes back (each is hand-editable too) |
+| `HID_L_EST` / `PAD_L_EST` / `P5G_L_EST` | `-l` | the calibrated **physical** loop delay (the law's anchor is the frame-delivery instant, so the inference leg the round skips is printed as a diagnostic and stays out of `L`; the frame-wait and RGA legs the round pays itself are already inside every reading), **one slot per output mode** — the only quantity the firmware ever writes back (each is hand-editable too) |
 | `HID_SPDX` `HID_SPDY` `HID_ADS_SPDX` `HID_ADS_SPDY` | `--spd` / `--ads-spd` | hid slot: pull-speed ratios, per axis (integer; `100` = baseline, larger = faster, meaningful band `5..2000`; shipped default `75` = the baseline at the 1440p deployment source) |
 | `PAD_SPDX` `PAD_SPDY` `PAD_ADS_SPDX` `PAD_ADS_SPDY` | `--spd` / `--ads-spd` | pad slot: the same four in the gamepad channel's units |
 | `P5G_SPDX` `P5G_SPDY` `P5G_ADS_SPDX` `P5G_ADS_SPDY` | `--spd` / `--ads-spd` | p5g slot: the same four for the PS5 channel |

@@ -574,16 +574,17 @@ int main() {
             CHECK(all.find("HID_L_EST=\"${HID_L_EST:-60.0}\"") != std::string::npos
                   && all.find("P5G_L_EST=\"${P5G_L_EST:-60.0}\"") != std::string::npos,
                   "另两格延迟原值不变");
-            // 回写的**值**由调用方给, 不是本引擎的 l_est: 完整环路延迟 = 物理 L + 推理段
-            //   均值, 那一腿由采集线程逐帧累计 (见 io/capture.cpp 的标定段), 引擎写它拿到
-            //   的那个数 —— 于是"脚本里那个数"与"运行态生效的那个数"必然是同一个
+            // 回写的**值**由调用方给 —— 采集侧给的就是本引擎的物理 l_est (见 io/calib_run.h
+            //   的 "回写" 段: 律的锚点是帧交付时刻, 其后的推理段由 age 承载, 不进 L), 取值
+            //   点收在一处, 于是"脚本里那个数"与"运行态生效的那个数"必然是同一个。这里换
+            //   一个不同的数, 验证落盘的确实是调用方给的那个而不是引擎自己取的口径
             {
-                const float composed = e.r.l_est + 2.25f;
-                CHECK(cal_writeback(CAL_VAR_PAD, e.r, composed, path),
+                const float given = e.r.l_est + 2.25f;
+                CHECK(cal_writeback(CAL_VAR_PAD, e.r, given, path),
                       "成功路径写回 (值由调用方给)");
-                snprintf(want,sizeof(want),"PAD_L_EST=\"${PAD_L_EST:-%.1f}\"\n",(double)composed);
+                snprintf(want,sizeof(want),"PAD_L_EST=\"${PAD_L_EST:-%.1f}\"\n",(double)given);
                 CHECK(slurp().find(want) != std::string::npos,
-                      "落盘的是传入的环路延迟值 (物理 L + 推理段均值), 不是引擎的物理 L");
+                      "落盘的是传入的环路延迟值 (调用方给什么写什么), 不是引擎自己取的口径");
             }
             CHECK(cal_writeback(CAL_VAR_P5G, e.r, e.r.l_est, path)
                   && slurp().find("P5G_L_EST=\"${P5G_L_EST:-") != std::string::npos,
