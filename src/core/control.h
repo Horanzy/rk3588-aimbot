@@ -13,7 +13,11 @@
 
 // ========================= 跟踪滤波器 (Smith 预测器, dt 归一) =========================
 const float PRED_ALPHA0   = 0.50f;                   // 位置增益 @120fps; 实际 α=ALPHA0·dt/DT0 (帧率无关)
+const float PRED_ALPHA_MAX = 0.90f;                  // α 饱和上限 (AGENTS 伪码 α=min(.9,·)): 帧率高于参考时
+                                                     //   增益不再随 dt 归一比线性上涨
 const float PRED_BETA0    = 0.03f;                   // 速度增益 @120fps; 实际 β=BETA0·dt/DT0 (0.03 = 失配带边缘余量)
+const float PRED_BETA_MAX  = 0.60f;                  // β 饱和上限 (AGENTS 伪码 β=min(.6,·)); 重建旗标保持
+                                                     //   时长的分母以同一上限封顶 — 两处必须同值
 const float PRED_L_COMP   = 1.10f;                   // Smith 过补偿系数 (>1 帮欠补偿侧 L真>L̂, 危险方向)
 const float PRED_DT0      = 1000.0f / 120.0f;        // 增益归一参考帧周期
 const float TRACK_JUMP_GATE = 100.0f;                // 创新超此值 → 重置滤波器

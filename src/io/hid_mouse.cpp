@@ -52,7 +52,11 @@ static std::vector<std::string> mouse_candidates() {
 }
 
 std::string find_mouse_device(const std::string& kw) {
-    if (!kw.empty() && kw.front()=='/') return access(kw.c_str(),R_OK)==0?kw:"";
+    if (!kw.empty() && kw.front()=='/') {
+        if (access(kw.c_str(),R_OK)==0) return kw;
+        std::cerr<<"❌ 鼠标: 路径打不开或不可读: "<<kw<<"\n";   // 显式路径也遵守"失败必有原因"
+        return {};
+    }
     std::vector<std::string> avail=mouse_candidates();
     if (kw.empty()) {
         if (avail.empty()) {

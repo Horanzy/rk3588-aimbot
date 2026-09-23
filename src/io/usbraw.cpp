@@ -12,7 +12,9 @@
 //    收尾数据/状态阶段 (对纯状态阶段即零长度收尾) — 用 EP0_WRITE 会报
 //    wrong direction。
 //  UDC 被占 (INIT/RUN 的 EBUSY) 时点名占用者: configfs 的遗留实例是脚本的事, 持有
-//    /dev/raw-gadget 的进程由 report_udc_holders() 从 /proc 里列出来 (pid + 命令行)。
+//    /dev/raw-gadget 的进程由 report_udc_holders() 从 /proc 里列出来 (pid + 命令行);
+//    两处都查无时是死会话的内核残绑定, 报文里直接给出 dwc3 解绑/绑回的恢复命令
+//    (三种占用的口径见 AGENTS.md 板端事实与该函数注释)。
 // ============================================================================
 
 #include "io/usbraw.h"
@@ -571,17 +573,25 @@ static void out_loop(UsbRawSession* s) {
 }
 
 // ---- 生命周期 --------------------------------------------------------------
-// EBUSY 的点名: 占着 UDC 的可以是两种东西 —— 内核 configfs 里遗留的 gadget 实例
-//   (setup_platform.sh 写空它的 UDC 文件即解绑), 或一个持有 /dev/raw-gadget 的进程
-//   (会话 open 即绑, 只有该进程退出才释放; configfs 那边怎么腾都无效)。前者是脚本
-//   的事, 后者今天没有名字 —— 这里扫 /proc 把它点出来, 人手要杀的就是这些 pid。
-//   自身持着一份描述符 (会话已 open) 是既定事实, 排除自己。
-static void report_udc_holders() {
+// EBUSY 的点名: 占着 UDC 的可以是三种东西 —— 内核 configfs 里遗留的 gadget 实例
+//   (setup_platform.sh 写空它的 UDC 文件即解绑); 一个持有 /dev/raw-gadget 的进程
+//   (会话 open 即绑, 只有该进程退出才释放; configfs 那边怎么腾都无效); 以及一个
+//   **已死会话的内核残绑定** —— 进程在端点传输中途被杀时, 那条卡死的 dequeue 会把
+//   UDC 留在一个没有进程的会话上, 扫 /proc 扫不到任何人, configfs 也是空的, 唯一
+//   的恢复是把 dwc3 解绑再绑回 (口径与出处见 AGENTS.md 的板端事实一节)。
+//   前两种在这里点得出来 (列出 pid / 指向脚本), 第三种以"排除法"呈现: 两种都查无
+//   时给出解绑/绑回命令, 人不用再翻文档。自身持着一份描述符 (会话已 open) 是既定
+//   事实, 排除自己。
+static void report_udc_holders(const std::string& udc_inst) {
     const std::vector<std::pair<int, std::string>> holders =
         proc_fd_holders("/dev/raw-gadget", (int)getpid());
     if (holders.empty()) {
-        std::cerr << "   未见持有 /dev/raw-gadget 的进程 —— 占用不来自进程: 内核 configfs 里"
-                     "遗留的 gadget 实例由 sudo bash scripts/setup_platform.sh 解绑\n";
+        std::cerr << "   未见持有 /dev/raw-gadget 的进程。两种可能:\n"
+                     "   · 内核 configfs 里遗留的 gadget 实例 → sudo bash scripts/setup_platform.sh 解绑\n"
+                     "   · configfs 已空而仍 EBUSY: 上一个会话被杀时端点传输卡死在内核, UDC 挂在一个\n"
+                     "     已无进程的会话上 —— 解绑再绑回 dwc3 重建 (数秒, 不掉其它功能):\n"
+                     "     echo " << udc_inst << " | sudo tee /sys/bus/platform/drivers/dwc3/unbind\n"
+                     "     echo " << udc_inst << " | sudo tee /sys/bus/platform/drivers/dwc3/bind\n";
         return;
     }
     std::cerr << "   UDC 归这些进程 (各自持有 /dev/raw-gadget, 直到它退出):\n";
@@ -621,14 +631,14 @@ bool usbraw_start(UsbRawSession& s, const UsbRawDeviceDef& dev) {
     if (ioctl(s.fd, USB_RAW_IOCTL_INIT, &init) < 0) {
         const int e = errno;
         std::cerr << "❌ raw_gadget INIT 失败: " << strerror(e) << "\n";
-        if (e == EBUSY) report_udc_holders();
+        if (e == EBUSY) report_udc_holders(init.device_name);
         close(s.fd); s.fd = -1;
         return false;
     }
     if (ioctl(s.fd, USB_RAW_IOCTL_RUN, 0) < 0) {
         const int e = errno;
         std::cerr << "❌ raw_gadget RUN 失败: " << strerror(e) << "\n";
-        if (e == EBUSY) report_udc_holders();
+        if (e == EBUSY) report_udc_holders(init.device_name);
         close(s.fd); s.fd = -1;
         return false;
     }

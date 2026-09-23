@@ -181,6 +181,30 @@ def send_hot(port: int, wire: dict) -> None:
         s.close()
 
 
+def aimbot_lock_free():
+    """实例锁 /run/aimbot.lock 是否已无人持有 (None = 判不了, 如锁文件打不开)。
+
+    锁由内核在持锁进程**彻底**退出时释放 —— 比 /proc 项消失更接近"独占资源空出来
+    了": /proc 项在进程已死未收尸 (僵尸) 的状态下仍然存在, 而彼时锁早已释放。
+    SIGTERM 之后等它, 等的就是"上一个实例真的可以被打扰"这件事本身。
+    (fcntl 在函数内导入: 与 sudo_prefix 的 geteuid 守卫同一理由, 模块保持可移植。)"""
+    import fcntl
+    try:
+        fd = os.open("/run/aimbot.lock", os.O_RDWR)
+    except FileNotFoundError:
+        return True                          # 锁文件不在 = 从未有实例取过锁
+    except OSError:
+        return None                          # 权限等: 判不了 (非 root 部署)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return True
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
+
+
 class InstanceManager:
     def __init__(self, history_path: Path):
         self._hist_path = history_path
@@ -552,7 +576,14 @@ class InstanceManager:
         return True
 
     def kill_all(self, root: Path) -> int:
-        """杀掉所有 aimbot 进程 (启动前清场)。返回杀掉的数量。"""
+        """杀掉所有 aimbot 进程 (启动前清场)。返回杀掉的数量。
+
+        SIGTERM 之后等的完成判据是**实例锁释放**而不是 /proc 项消失: 锁由内核在持锁
+        进程彻底退出时释放, 而 /proc 项在"已死未收尸"的状态下仍在 —— 等后者会把早已
+        交出资源的进程等满整个宽限再补一刀无意义的 SIGKILL。锁判不了时 (非 root 部署,
+        锁文件打不开) 退回 /proc 判据。宽限 5s 后锁仍被占才升级 SIGKILL —— 固件自己
+        的接管路径对同一场等待给 3s (core/proc_util.cpp 的 INSTANCE_TERM_GRACE_MS:
+        本库正常停机实测亚秒级, 3s 已是一个量级以上的余量), 面板是另一条路, 多给一档。"""
         bin_path = str(root / "bin" / "aimbot")
         pids = find_aimbot_pids(bin_path)
         if not pids:
@@ -564,15 +595,19 @@ class InstanceManager:
             except OSError:
                 pass
         deadline = time.time() + 5
+        released = False
         while time.time() < deadline:
-            if not [p for p in pids if Path("/proc/%d" % p).exists()]:
+            lf = aimbot_lock_free()
+            if lf or (lf is None and not [p for p in pids if Path("/proc/%d" % p).exists()]):
+                released = True
                 break
             time.sleep(0.2)
-        for pid in pids:
-            try:
-                if Path("/proc/%d" % pid).exists():
-                    os.kill(pid, signal.SIGKILL)
-                    self._append_log("pid %d SIGTERM 未退, 已 SIGKILL" % pid)
-            except OSError:
-                pass
+        if not released:
+            for pid in pids:
+                try:
+                    if Path("/proc/%d" % pid).exists():
+                        os.kill(pid, signal.SIGKILL)
+                        self._append_log("pid %d SIGTERM 未退 (实例锁仍被占), 已 SIGKILL" % pid)
+                except OSError:
+                    pass
         return len(pids)

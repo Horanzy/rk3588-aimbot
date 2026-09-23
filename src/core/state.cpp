@@ -20,9 +20,11 @@ std::atomic<bool> g_padcalib_request{false};         // pad 标定请求 (热参
 
 std::atomic<bool> g_left_down{false};
 
-std::atomic<float> g_conf_thr{0.4f};                 // 置信度阈值 (-t)
+// 热参原子初值 = 参数面的缺省值 (-t 0.5 / -y 65 / -x 2667 → 2.667 px/ms); main 在参数
+//   解析后总会以 CLI 值覆写它们, 初值只是"未覆写时也是文档值"的保证。
+std::atomic<float> g_conf_thr{0.5f};                 // 置信度阈值 (-t)
 std::atomic<float> g_y_off_pct{65.0f};               // 瞄准高度偏移 % (-y)
-std::atomic<float> g_max_v{1.5f};                    // 速度上限 px/ms (= -x / 1000)
+std::atomic<float> g_max_v{2.667f};                  // 速度上限 px/ms (= -x / 1000)
 std::atomic<int>   g_aim_mode{0};                    // 触发键模式 (-k): 0=fire 1=ads 2=both
 std::atomic<float> g_fov_radius{FOV_RADIUS};         // FOV 半径 px (-r / 热参 fov)
 std::atomic<bool>  g_aim_enabled{true};              // 鼠标接管 (-a / 热参 aim): false=纯透传不注入

@@ -206,7 +206,9 @@ python3 -m venv .venv && .venv/bin/python -m pip install -r requirements.txt
 
 - 单实例不变量。状态机 `stopped → starting → running → exited`（退出码/信号/异常标记可查）。
 - **【启动】= 保存当前设置 → 清掉所有在跑实例（`/proc/*/exe` 精确匹配 `<根>/bin/aimbot`，
-  含 SSH 手跑的；SIGTERM → 5s 超时 SIGKILL）→ `scripts/setup_platform.sh` → aimbot**。
+  含 SSH 手跑的；SIGTERM 后等**实例锁 `/run/aimbot.lock` 释放** —— 锁由内核在持锁进程彻底
+  退出时才释放, 僵尸态下 `/proc` 项仍在而资源早已交出; 锁判不了时退回 `/proc` 判据 ——
+  5s 后锁仍被占才 SIGKILL）→ `scripts/setup_platform.sh` → aimbot**。
   平台准备脚本幂等（三样前提都已就绪时只回读版本后退出），失败则中止并把 stderr 显示出来 —— 缺
   `librga` / `raw_gadget` / axcl 任一样时固件根本起不来，拉起一个必然失败的进程没有意义。
   “重启” = 再点一次【启动】。

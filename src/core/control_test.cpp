@@ -238,7 +238,7 @@ int main() {
             std::lock_guard<std::mutex> lk(g_target.mtx);
             out_px = g_target.px; out_py = g_target.py;
         };
-        const float alpha = std::min(0.90f, PRED_ALPHA0 * 10.0f / PRED_DT0);
+        const float alpha = std::min(PRED_ALPHA_MAX, PRED_ALPHA0 * 10.0f / PRED_DT0);
         // fx = −s·Δcounts + α·(观测 + s·Δcounts)
         const auto pred = [&](float s, float counts, float obs) {
             return -s * counts + alpha * (obs + s * counts);

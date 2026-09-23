@@ -54,11 +54,11 @@ float estimator_step(EstimatorState& st, std::chrono::steady_clock::time_point n
                 st.sig2rx=st.sig2ry=1;st.ybar_x=st.ybar_y=0;st.ax_e=st.ay_e=0;
                 st.reb_x=st.reb_y=true;
                 float rb_hold=ACC_RB_HOLD_N*dt
-                    /std::max(1e-6f,std::min(0.60f,PRED_BETA0*dt/PRED_DT0));
+                    /std::max(1e-6f,std::min(PRED_BETA_MAX,PRED_BETA0*dt/PRED_DT0));
                 st.reb_until_x=st.reb_until_y=shift_ms(now,rb_hold); }
             else { float rr=dt/PRED_DT0;
-                   float alpha=std::min(0.90f,PRED_ALPHA0*rr);
-                   float beta=std::min(0.60f,PRED_BETA0*rr);
+                   float alpha=std::min(PRED_ALPHA_MAX,PRED_ALPHA0*rr);
+                   float beta=std::min(PRED_BETA_MAX,PRED_BETA0*rr);
                    st.sig2x+=beta*(inx*inx-st.sig2x);
                    st.sig2y+=beta*(iny*iny-st.sig2y);
                    // 方向矛盾 CUSUM (σ 自标定): 持续矛盾创新 → 告警后该轴 v̂ 归零重拉

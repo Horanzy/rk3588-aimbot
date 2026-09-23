@@ -139,7 +139,7 @@ inline double elapsed_ms(
 struct TargetState {
     float px = 0, py = 0, vx = 0, vy = 0;
     float ax_e = 0, ay_e = 0;                    // â 加速度估计 (px/ms², 0=未通过显著性/重建/门控)
-    float last_dt = 1000.0f / 120.0f;            // 最近一帧的滤波增益 (供 â 反演与 ε 修正)
+    float last_dt = PRED_DT0;                    // 最近一帧的滤波增益 (供 â 反演与 ε 修正; 初值 = 参考帧周期)
     float last_alpha = PRED_ALPHA0, last_beta = PRED_BETA0;
     float cs = 0;                                // CUSUM 告警电平 (σ 倍数归一, 信任度来源)
     bool  valid = false;
@@ -198,6 +198,9 @@ struct MouseState {
 };
 
 // ---- 异步写盘队列 ----
+// 深度 8 是突发缓冲不是节流器: 截图按突发产生 (三源同拍叠加), 单张 JPEG 落盘几十 ms,
+//   8 = 三源连发叠加的数倍余量; 再深只会把磁盘卡顿时延拉长, 满了按设计丢弃并以
+//   g_dropped 计数让过载可见 (采集统计行打印)。
 const size_t SAVE_QUEUE_MAX = 8;
 struct SaveTask { cv::Mat img; std::string path; };
 extern std::queue<SaveTask> g_save_q;
