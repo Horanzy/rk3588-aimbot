@@ -542,22 +542,20 @@ void ai_thread(std::string model_path, int target_cls, int num_classes,
                 fflush(stdout);
             }
             if (done == 1) {
-                // 回写的环路延迟 = 物理 L + 推理段均值 (口径见 inf_us_sum 的说明与
-                //   io/calib_run.h 的回写段)。**运行态同步取这一个值**: 律要补偿的是完整
-                //   回路, 而标定量的物理那一半缺了推理这一腿。冷启动 (本次运行还没有跑过
-                //   一帧推理) 时没有均值可加: 只写物理值并把这件事说出来 —— 绝不补一个
-                //   编造的推理耗时, 也绝不留一个没说清的差。
+                // 回写与运行态生效的都是**标定量的物理环路延迟**。律的时间戳锚点是帧交付
+                //   时刻 (wait_frame 返回处取的 now), 该时刻之后的 RGA 与推理处理由 age 与
+                //   gap_scale 在每一拍里承载 —— 把它再加进 L 就是把同一段算两遍: 实测 640
+                //   模型 (推理段 6.39ms) 下信念被抬高 11%, arena 匹配档 composite
+                //   114.66 → 129.11, 违反"匹配档不得上升"。推理段均值仍在 [AI FPS] 行里报,
+                //   它现在是诊断量, 不参与任何计算。
                 const double inf_ms = inf_n ? inf_us_sum / (double)inf_n / 1000.0 : 0.0;
-                const float  l_write = (float)((double)cr.l_est + inf_ms);
+                const float  l_write = cr.l_est;
                 // 行内同样写 L=: 面板的延迟卡片取的就是这条 (它显示"在用的那一格"),
                 //   而回写与运行态生效的是同一个数 —— 卡片、脚本、律三处一致
-                if (inf_n)
-                    printf("[标定] L=%.1f ms (完整环路延迟 = 物理 %.1fms + 推理段均值 %.2fms/"
-                           "%ld 帧; 推理段是标定整轮跳过的那一腿, 取帧与 RGA 两腿已量在物理值里)\n",
-                           (double)l_write, (double)cr.l_est, inf_ms, inf_n);
-                else
-                    printf("[标定] L=%.1f ms (完整环路延迟 = 物理 %.1fms; 本次运行还没跑过推理帧, "
-                           "无推理段均值 — 只写物理值)\n", (double)l_write, (double)cr.l_est);
+                printf("[标定] L=%.1f ms (物理环路延迟; 推理段均值 %.2fms/%ld 帧仅供参考 —— "
+                       "律的锚点是帧交付时刻, 其后的处理由 age 承载, 不进 L)
+",
+                       (double)l_write, inf_ms, inf_n);
                 if (!persist_path.empty()) {
                     // 回写 VAR 名由输出模式在 main 里选好 (三套输出各一格延迟)
                     if (cal_writeback(cal_var, cr, l_write, persist_path))
