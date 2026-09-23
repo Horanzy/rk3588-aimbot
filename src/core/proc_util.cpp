@@ -70,7 +70,9 @@ std::vector<std::pair<int, std::string>> proc_fd_holders(const char* node, int e
             struct stat got{};
             const std::string fdp = fdd + "/" + fe->d_name;
             if (stat(fdp.c_str(), &got) != 0) continue;   // 该描述符已关闭
-            hit = S_ISCHR(got.st_mode) && got.st_rdev == want.st_rdev;
+            // (dev, ino) 对字符设备与普通文件同样成立: 前者比设备号, 后者比 inode ——
+            //   锁文件是普通文件, 用设备号是找不到持有者的。
+            hit = got.st_dev == want.st_dev && got.st_ino == want.st_ino;
         }
         closedir(fd);
         if (hit) out.push_back({pid, proc_cmdline(pid)});
@@ -167,18 +169,30 @@ bool instance_lock_acquire() {
             std::cerr << "❌ 实例锁加锁失败: " << strerror(errno) << "\n";
             return false;
         }
-        char buf[32] = {0};
-        const ssize_t n = pread(fd, buf, sizeof(buf) - 1, 0);
-        const int pid = n > 0 ? atoi(buf) : 0;
-        const std::string cl = proc_cmdline(pid);
+        // 持有者以"谁打开着锁文件"为准 —— 锁文件的内容可能过期 (上一个实例被 kill -9 或
+        //   崩溃时它不会自己清), 内容只在扫不到持有者时作为 pid 提示用。
+        auto holders = proc_fd_holders(INSTANCE_LOCK_PATH, (int)getpid());
+        int pid = holders.size() == 1 ? holders[0].first : 0;
+        if (pid == 0) {
+            char buf[32] = {0};
+            const ssize_t n = pread(fd, buf, sizeof(buf) - 1, 0);
+            if (n > 0) pid = atoi(buf);
+        }
+        const std::string cl = pid > 0 ? proc_cmdline(pid) : "";
         // 本库自己的进程 (bin/aimbot 与 build/ 下的探针): 接管 —— 换一个实例就是在换
         //   这一次运行, 不该要求人去 kill。边界见 proc_util.h: 根之外的进程不碰。
-        if (attempt == 0 && proc_is_ours(pid, own_root())) {
-            std::cerr << "[接管] 上一个实例还在跑: pid " << pid
-                      << (cl.empty() ? " (命令行读不到)" : "  " + cl) << " → SIGTERM\n";
-            if (proc_terminate_owned(pid, INSTANCE_TERM_GRACE_MS) &&
-                flock_retry(fd, INSTANCE_LOCK_WAIT_MS)) {
-                std::cerr << "[接管] pid " << pid << " 已结束, 实例锁已收归本进程\n";
+        bool all_ours = !holders.empty();
+        for (const auto& h : holders)
+            if (!proc_is_ours(h.first, own_root())) all_ours = false;
+        if (attempt == 0 && all_ours && proc_is_ours(pid, own_root())) {
+            bool all_gone = true;
+            for (const auto& h : holders) {
+                std::cerr << "[接管] 上一个实例还在跑: pid " << h.first
+                          << (h.second.empty() ? " (命令行读不到)" : "  " + h.second) << " → SIGTERM\n";
+                if (!proc_terminate_owned(h.first, INSTANCE_TERM_GRACE_MS)) all_gone = false;
+            }
+            if (all_gone && flock_retry(fd, INSTANCE_LOCK_WAIT_MS)) {
+                std::cerr << "[接管] 持有者已结束, 实例锁已收归本进程\n";
                 continue;                                  // 回循环头再 flock 一次
             }
             std::cerr << "❌ 接管失败: pid " << pid << " 已结束但锁仍取不到\n"
@@ -190,11 +204,12 @@ bool instance_lock_acquire() {
         else         std::cerr << " (持有者的 pid 读不到, 锁内容为空)";
         std::cerr << "\n"
                      "   UDC / 采集设备 / NPU 卡一次只归一个进程; 本进程已退出, 未触碰任何设备\n";
-        if (pid > 0 && proc_is_ours(pid, own_root()))
-            std::cerr << "   它是本库自己的进程, 正常情况下会被自动接管 —— 走到这里说明接管没成功\n";
-        else if (pid > 0)
-            std::cerr << "   它不是本库的进程 (可执行文件不在部署根内), 按边界不碰它; "
-                         "先停掉它:  kill " << pid << "\n";
+        if (holders.empty())
+            std::cerr << "   (打开锁文件的进程扫不到: 权限或文件系统受限)\n";
+        else if (!all_ours)
+            std::cerr << "   持有者里有部署根之外的进程, 按边界一个都不碰; 先停掉它们再启动\n";
+        else
+            std::cerr << "   持有者都是本库自己的进程, 正常情况下会被自动接管 —— 走到这里说明接管没成功\n";
         return false;
     }
     return false;
