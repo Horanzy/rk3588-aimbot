@@ -709,8 +709,19 @@ same 640 window itself, so those are shared legs already inside every reading, a
 the same delay twice. The round's log carries both numbers and the total: the physical `L`, the averaged
 inference leg with the frame count it was averaged over, and the written sum; a cold start (no inference
 frame has run yet in this process) writes the physical value alone and says so — no number is ever invented.
+The leg is a measured, load-dependent quantity rather than a constant, which is exactly why it is averaged at
+write-back time: on this board with the shipped 320-px 4-class model the `[AI FPS]` line reads 2.39 ms mean
+over 7187 frames in a quiet 60 s window and 3.66 ms mean over 6767 frames while another NPU consumer shared
+the card (`pack 0.05 H2D 0.76 exec 1.25 D2H 0.28 解码 0.05` against `0.05 / 1.42 / 1.27 / 0.87 / 0.05` ms) —
+the two transfer segments, not the NPU's own execution, are what the contention moves.
 The runtime's `l_est` is set to that same sum in the one place the composition happens (the capture thread),
-so the value in the script and the value the law uses are one fact. `-a n` (pure pass-through) makes
+so the value in the script and the value the law uses are one fact. The shift is small enough that the
+evaluation groups hold at it: `arena.eval ff_pi_acc 52.3` gives matched 116.62, worst mismatch 115.51 and a
+60/120 fps delta of 1.2% (against 114.66 / 125.12 / 1.9% at the 50 ms belief), `arena.integrate`'s wide band
+(L20–80) and sensitivity band (s0.7–1.3) show no divergence at that belief, and `arena.fps_eval`'s totals
+move within a few percent either way (clean mean overshoot 27.35 → 26.01 px) — the one cell that gets
+visibly worse is the flaky `drop_p=0.12` airborne on-body fraction (78% → 70%), the price of the 4.4% lower
+`wn` that a larger believed delay buys. `-a n` (pure pass-through) makes
 calibration unreachable and resets a running round (the excitation is program-injected motion, exactly what
 pass-through forbids). Unmeasurable outcomes are reported as such with their evidence in the log: no motion
 at all, only noise (σ = 0.000 exactly = a frozen screen — the observation when the receiver carries a static
@@ -1209,6 +1220,12 @@ framerate penalty, so it stays out of the library.
   allocates the buffers from that format, and both the ordering and the buffer-size rule are derived from
   the driver's behaviour rather than observed across an actual mode change — the board's signal source is a
   fixed-mode source, so the walk-through exercised end to end is lock loss → re-lock at an unchanged mode.
+- **未验证: a successful round's composed write-back line has not been seen on this board.** The board's
+  signal source is a static screen, so every round here ends in the honest "no motion" failure (σ = 0.000
+  exactly, script byte-identical) — the *inference leg* is measured and printed by the `[AI FPS]` line, and
+  the engine's contract (the written value is the caller's composed total, not the engine's physical `l_est`)
+  is pinned by `build/calib_test`, but the three-number round line itself (physical + average + total) has
+  only been reviewed, not observed, because a round against a static screen can never succeed.
 - **未验证: the codeword-length loss of self-converted models.** The measured resolution loss (one quantised
   tensor carrying both coordinates and confidences) is reported by `model_probe` but not corrected in this
   repository; the fix belongs to the conversion pipeline, outside it.
