@@ -11,6 +11,8 @@
 //    wLength>0) 经 EP0_WRITE 送数据; OUT 方向或 wLength=0 的一律经 EP0_READ
 //    收尾数据/状态阶段 (对纯状态阶段即零长度收尾) — 用 EP0_WRITE 会报
 //    wrong direction。
+//  UDC 被占 (INIT/RUN 的 EBUSY) 时点名占用者: configfs 的遗留实例是脚本的事, 持有
+//    /dev/raw-gadget 的进程由 report_udc_holders() 从 /proc 里列出来 (pid + 命令行)。
 // ============================================================================
 
 #include "io/usbraw.h"
@@ -23,6 +25,8 @@
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include <dirent.h>
 #include <fcntl.h>
@@ -35,6 +39,7 @@
 #include <linux/hid.h>                 // HID_DT_REPORT (类 GET_DESCRIPTOR 的类型值)
 #include <linux/usb/raw_gadget.h>
 
+#include "core/proc_util.h"
 #include "core/state.h"
 
 // ioctl 数据缓冲: uapi 的 data[] 是柔性数组成员, 不能作为 struct 的中间成员
@@ -566,6 +571,26 @@ static void out_loop(UsbRawSession* s) {
 }
 
 // ---- 生命周期 --------------------------------------------------------------
+// EBUSY 的点名: 占着 UDC 的可以是两种东西 —— 内核 configfs 里遗留的 gadget 实例
+//   (setup_platform.sh 写空它的 UDC 文件即解绑), 或一个持有 /dev/raw-gadget 的进程
+//   (会话 open 即绑, 只有该进程退出才释放; configfs 那边怎么腾都无效)。前者是脚本
+//   的事, 后者今天没有名字 —— 这里扫 /proc 把它点出来, 人手要杀的就是这些 pid。
+//   自身持着一份描述符 (会话已 open) 是既定事实, 排除自己。
+static void report_udc_holders() {
+    const std::vector<std::pair<int, std::string>> holders =
+        proc_fd_holders("/dev/raw-gadget", (int)getpid());
+    if (holders.empty()) {
+        std::cerr << "   未见持有 /dev/raw-gadget 的进程 —— 占用不来自进程: 内核 configfs 里"
+                     "遗留的 gadget 实例由 sudo bash scripts/setup_platform.sh 解绑\n";
+        return;
+    }
+    std::cerr << "   UDC 归这些进程 (各自持有 /dev/raw-gadget, 直到它退出):\n";
+    for (const auto& h : holders)
+        std::cerr << "     pid " << h.first << ": "
+                  << (h.second.empty() ? "(命令行读不到)" : h.second) << "\n";
+    std::cerr << "   先停掉上面列出的进程 (kill <pid>) 再启动 —— configfs 解绑对它们无效\n";
+}
+
 bool usbraw_start(UsbRawSession& s, const UsbRawDeviceDef& dev) {
     if (dev.config_len > USBRAW_DESC_MAX || dev.report_desc_len > USBRAW_DESC_MAX) {
         std::cerr << "❌ 设备定义描述符超应答缓冲上限 (" << USBRAW_DESC_MAX << "B)\n";
@@ -594,15 +619,16 @@ bool usbraw_start(UsbRawSession& s, const UsbRawDeviceDef& dev) {
         return false;
     }
     if (ioctl(s.fd, USB_RAW_IOCTL_INIT, &init) < 0) {
-        std::cerr << "❌ raw_gadget INIT 失败: " << strerror(errno) << "\n";
+        const int e = errno;
+        std::cerr << "❌ raw_gadget INIT 失败: " << strerror(e) << "\n";
+        if (e == EBUSY) report_udc_holders();
         close(s.fd); s.fd = -1;
         return false;
     }
     if (ioctl(s.fd, USB_RAW_IOCTL_RUN, 0) < 0) {
         const int e = errno;
         std::cerr << "❌ raw_gadget RUN 失败: " << strerror(e) << "\n";
-        if (e == EBUSY)
-            std::cerr << "   UDC 被占: 先 sudo bash scripts/setup_platform.sh 腾空 (解绑遗留 gadget, 停占用进程)\n";
+        if (e == EBUSY) report_udc_holders();
         close(s.fd); s.fd = -1;
         return false;
     }

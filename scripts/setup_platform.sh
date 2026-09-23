@@ -21,7 +21,10 @@
 #      raw_gadget.c)。模块本身是部署机的事 (发行版包, 或按内核文档
 #      Documentation/usb/raw_gadget.rst 出树编译), 本脚本只负责把它载入并保持载入、
 #      放节点权限、把 UDC 腾空 —— 设备栈自己 (src/io/usbraw.cpp) 直接开 /dev/raw-gadget,
-#      会话 open 即绑 UDC、close 即解绑。持久化写 /etc/modules-load.d: 少了它, 一次重启
+#      会话 open 即绑 UDC、close 即解绑。**腾空只针对内核 configfs 里的遗留 gadget
+#      实例**; 一个进程持有的占用 (它开着 /dev/raw-gadget) 随该进程退出才释放, 本脚本
+#      对它无能为力 —— 该情况下 aimbot 的 EBUSY 行会点出占用者的 pid 与命令行。
+#      持久化写 /etc/modules-load.d: 少了它, 一次重启
 #      就把 USB 输出通道整条带走, 症状是 aimbot 启动失败而不是"忘了 modprobe"。
 #
 #   ③ axcl — AX650N 加速卡的运行时 (库在 /usr/lib/axcl, 设备节点 /dev/axcl_host)。
@@ -190,7 +193,12 @@ ensure_raw_gadget() {
             echo "⚠ 解绑 $g 失败 (手动: echo \"\" | sudo tee $g/UDC)"
         fi
     done
-    echo "ℹ 若 UDC 仍被占 (aimbot 报 EBUSY): 先停占用 /dev/raw-gadget 的进程 (如另一 aimbot 实例)"
+    # 本脚本能清的与清不了的: 上面解绑的是**内核 configfs 里的 gadget 实例** (写空
+    #   /sys/kernel/config/usb_gadget/*/UDC)。UDC 若被一个**持有 /dev/raw-gadget 的
+    #   进程**占着 (会话 open 即绑), 本脚本对它无能为力 —— 那份占用随该进程退出才
+    #   释放, 只能 kill。两种占用是不同来源, 别把前者当成后者的解药。
+    echo "ℹ 若 UDC 仍被占 (aimbot 报 EBUSY): 那占用属于持有 /dev/raw-gadget 的进程,"
+    echo "  本脚本清不掉 —— 停掉该进程才释放 (aimbot 的报错行会点出它的 pid 与命令行)"
 
     local udc
     udc=$(ls /sys/class/udc 2>/dev/null | head -n 1)
