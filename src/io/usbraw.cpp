@@ -581,8 +581,9 @@ static void out_loop(UsbRawSession* s) {
 //   的恢复是把 dwc3 解绑再绑回 (口径与出处见 AGENTS.md 的板端事实一节)。
 //   前两种在这里点得出来 (列出 pid / 指向脚本), 第三种以"排除法"呈现: 两种都查无
 //   时给出解绑/绑回命令, 人不用再翻文档。自身持着一份描述符 (会话已 open) 是既定
-//   事实, 排除自己。
-static void report_udc_holders(const std::string& udc_inst) {
+//   事实, 排除自己。udc_inst 取内核 uapi 的 UDC 实例名 (usb_raw_init.device_name,
+//   unsigned char[128]) —— 与它的类型直接匹配, ostream 对 unsigned char* 按 C 字符串输出。
+static void report_udc_holders(const unsigned char* udc_inst) {
     const std::vector<std::pair<int, std::string>> holders =
         proc_fd_holders("/dev/raw-gadget", (int)getpid());
     if (holders.empty()) {
