@@ -62,6 +62,12 @@ sudo journalctl -u aimbot-webui -n 20 --no-pager
 
 手动试跑（不装服务）：`cd webui && sudo python3 server.py`。
 
+unit 的排序只声明 `After/Wants=network.target`，不声明 `network-online.target`：面板只**监听**
+`0.0.0.0`，通配绑定不需要任何已配置的地址、也不消费任何上游 —— 而 `network-online.target` 要等
+`NetworkManager-wait-online`（板端实测约 90 s）才成立，面板因此会拖到开机后约 75 s 才可用。对一个
+只监听的服务，弱前提就是正确前提：晚起的那一分钟是白等。改 unit 后
+`sudo systemctl daemon-reload && sudo systemctl restart aimbot-webui`。
+
 平台前提（`install.sh` 检查并补齐，逐条理由见该脚本的注释）：
 
 - `axcl-smi`（AXCL 运行时自带，装在 `/usr/bin/axcl/`）—— NPU 占用与卡温的读数源；不在时
