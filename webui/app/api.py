@@ -246,18 +246,25 @@ def api_profile_put(stem: str, inp: ProfileIn):
 
     提交体是**补丁**: 只校验并写回它点名的键, 其余 VAR 保持脚本现值 —— UI 只提交本模式
     那一槽的改动 (切换 output_mode 后原样保存不会碰另两槽的任何一行), 后端也照补丁语义
-    写回, 于是"保存只写当前槽"在两头都成立。"""
+    写回, 于是"保存只写当前槽"在两头都成立。
+
+    写回函数收到的就是这份补丁, 不是"现值 ∪ 补丁"的合并结果: 整段"读现值 → 落笔"在它自己
+    的临界区里完成。在这里先合并再交出去是**一条被实测否掉的路** —— 那等于把读的那一半留在
+    锁外, 两个同时在飞的保存各拿一份旧现值, 后写者的重命名把前写者的改动整段抹掉 (板端
+    20 轮两个并发 PUT: 两项都落笔 0 轮)。下面的现值解析只服务于热参差量 (改了哪几项), 不参与
+    写回。"""
     p = _find_profile(stem)
     if p is None:
         raise HTTPException(404, "未知的游戏 profile: %s" % stem)
     script_path = S.root() / "scripts" / "game" / (stem + ".sh")
     old_params = discover.parse_script(script_path, S.root())
-    new_params = dict(old_params)
-    new_params.update(discover.validate_params(inp.params or {}, S.root(), partial=True))
+    patch = discover.validate_params(inp.params or {}, S.root(), partial=True)
     try:
-        discover.write_script_params(script_path, new_params, S.root())
+        discover.write_script_params(script_path, patch, S.root())
     except OSError as e:
         raise HTTPException(500, "写回脚本失败: %s" % e)
+    new_params = dict(old_params)
+    new_params.update(patch)             # 热参差量: 只比"本次点名的键"的旧值与新值
     # 热参数: 本次保存中变化的热项 → 直接下发运行中实例 (即时生效, 不重启)。
     #   倍率热参只有一套 (作用于运行中实例的当前输出模式), 所以槽键按**运行中实例的模式**
     #   取: 改的是另两槽的值时它只是脚本改动, 下次【启动】才生效。
