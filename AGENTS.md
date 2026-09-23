@@ -166,6 +166,24 @@ reading the diff here.
   `/dev/axcl_host`; the NPU runtime belongs to the board's BSP image). Device-tree or kernel-config
   changes are **not** part of it: the HDMI receiver node (`rk_hdmirx`), the in-kernel `rga3` driver
   and the AXCL host driver are image facts. Record such findings as notes here, not as script steps.
+- **The board's fan is not this repository's to drive, and the reason is a measured kernel-side one.**
+  The `pwm-fan` module hangs its SoC-temperature curve (the device tree's `rockchip,temp-trips` →
+  `cooling-levels`) on the `rockchip_system_monitor` notifier chain, and detaching that driver does not
+  leave the chain intact: an `unbind` leaves an entry whose `notifier_call` is NULL, and the next
+  `rockchip_system_monitor_thermal_check` work jumps through it to address `0x0`. Measured twice, the
+  fault follows the unbind by 3–11 s and the whole board wedges with it — the trace reads `pc : 0x0`,
+  `lr : notifier_call_chain+0x74/0x94`, then `blocking_notifier_call_chain` ←
+  `rockchip_system_monitor_thermal_update` ← `rockchip_system_monitor_thermal_check` on the
+  `events_freezable` workqueue. Reproduction: `echo -n pwm-fan > /sys/bus/platform/drivers/pwm-fan/unbind`
+  and wait for the next thermal check. The opposite direction was measured the same way and is worse:
+  a bind parks `pwm_fan_probe` on that chain's rwsem forever — D state, unkillable, so the driver lock
+  stays held and every later unbind queues behind it. The channel is therefore not operable from
+  userspace at all, and that is affordable because nothing needs it: at the SoC's idle temperature the
+  kernel's own curve sits on its first level, 19.6 %, which is below this fan's start threshold, so the
+  fan simply does not turn, and the SoC idles at 37–48 °C in that state (measured over this
+  repository's runs). If a duty ever does have to be pinned, it has to happen without touching the
+  binding — drive the bound driver's hwmon `pwm1`, or keep the module from loading in the first place —
+  未验证: neither path has been measured on this board.
 - The board image's own facts, for when a prerequisite fails: receiver node
   `/sys/class/video4linux/videoN/name` = `stream_hdmirx` (driver `rk_hdmirx`; the node number is not
   stable across reboots, which is why the default is name resolution), `raw_gadget` loadable with
