@@ -13,6 +13,10 @@
 200ms 中位 |e|), 对"事件前就在持续拖尾"的工况会失明 (典型: 跳跃滞空期准星
 一直落后 → pre 已经很大 → over 被压小), 阶段指标补上这一段。
 
+口径: 打印的 RMSE 均值与 EVENT_OVER / REC 都是**套件内全部场景**的合并量 ——
+各 law docstring 里引用的 fps_eval 数字一律按这一条读 (套件增删场景时, 那些数字
+随本命令的输出一起更新, 不保留旧套件口径的副本)。
+
 用法: python -m arena.fps_eval [law ...]     (默认 ff_pi_acc reference)
 """
 from __future__ import annotations

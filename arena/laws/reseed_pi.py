@@ -51,7 +51,7 @@
     失配扫描 L30..70 = {83.68, 66.55, 81.09, 83.13, 125.58}; 宽延迟
     L20-80 = {91.40, 80.26, 67.60, 78.25, 87.51, 121.90, inf} (L80 为
     settle 刀锋); s 失配 0.7-1.3 = {102.75, 77.52, 78.25, 92.49, 109.96};
-    relock 386.0ms·3.16px; fps_eval clean RMSE 20.68 / flaky 21.51;
+    relock 386.0ms·3.16px; fps_eval clean RMSE 22.42 / flaky 23.60;
     OVERALL 161.54。holdout (seeds 4,5,6): worst 123.31, 无发散。
     帧率: 60fps composite 165.29 vs 120fps 146.64 (差 12.7%) — 逐场景看
     60fps 退化全部在 maneuver (+0.5px, +2.8%), step/const_vel/accel 逐位

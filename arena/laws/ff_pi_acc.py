@@ -65,8 +65,8 @@ CUSUM 速度归零重拉 + 结构性加速度偏差补偿 (ff_pi 系现役律)�
     matched 114.7 (step settle 277ms / 过冲 3.11px, const_vel rmse 0.82px,
     accel rmse 4.37px in_band 77.6%, maneuver rmse 19.41px); 失配扫描
     L30-70 全过 (worst 125.12); 宽延迟 L20-70 与 s {0.7..1.3} 全档通过
-    (L80 边缘 settle-fail); relock 386.0ms / 3.16px; fps_eval RMSE
-    20.40px, 事件过冲/恢复与门关闭路径一致; 60/120fps 差 1.9%; OVERALL
+    (L80 边缘 settle-fail); relock 386.0ms / 3.16px; fps_eval clean RMSE
+    22.18px (flaky 23.60), 事件过冲/恢复与门关闭路径一致; 60/120fps 差 1.9%; OVERALL
     123.62。holdout (seeds 4,5,6): matched 111.96, accel 4.36px, OVERALL
     139.37。
 

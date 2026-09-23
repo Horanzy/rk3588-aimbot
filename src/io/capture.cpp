@@ -478,7 +478,7 @@ void ai_thread(std::string model_path, int target_cls, int num_classes,
         }
 
         // 自身运动换算的账本来源与逐轴比例在 estimator_step 内部按输出模式取
-        //   (一次快照, 见 core/estimator.cu); 标定期 found=false, 发布的目标自然过期。
+        //   (一次快照, 见 core/estimator.cpp); 标定期 found=false, 发布的目标自然过期。
         //   返回的实测 dt 是标定读数的量化底 (边沿 ±dt/2 与尾迹的 dt_first), 故采样
         //   必须在它之后。
         const float dt = estimator_step(est, now, found, best_dx, best_dy, l_est, max_v);

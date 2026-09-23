@@ -299,7 +299,7 @@ int main() {
         CHECK(!dfl_bins_ok(0) && !dfl_bins_ok(-8),
               "0 与负值拒绝 (类数给多了 —— 配置比属性数还大)");
         CHECK(decode_outputs({o.data()}, {l}, 124, 0.1f, -1, 640).empty(),
-              "DFL 类数配置错到 4·reg_max = 20 时整块跳过 (旧判据 '%4' 会照解出错的框)");
+              "DFL 类数配置错到 4·reg_max = 20 时整块跳过 (只查整除的判据 '%4' 会照解出错的框)");
         // 判据不误伤真配置: reg_max = 8 (4·reg_max = 32) 的最小合法形状照常解
         {
             const int g2 = 4, a2 = 33, reg8 = 8;      // attrs = 4·reg_max(8) + 类数(1) = 33

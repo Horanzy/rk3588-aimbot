@@ -39,7 +39,7 @@
     matched composite 104.0 — accel rmse 4.25px, maneuver 13.63px;
     step settle 443ms 变慢 (低机动模式位置增益 ~0.58 vs α-β 的 0.50,
     尾段略糊)。
-    FPS 组: RMSE 均值 17.1px, 事件过冲 mean 26.7 / worst 69.7, REC 7ms。
+    FPS 组: RMSE 均值 18.1px, 事件过冲 mean 25.8 / worst 69.7, REC 6ms。
 
 已知局限 — 失配带不存活 (OVERALL = inf):
     延迟失配 L30/L40/L70 与宽延迟 L20-40、L70-80、s0.70 全部 inf: L_真

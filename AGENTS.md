@@ -1195,7 +1195,7 @@ FF+CUSUM pack unfixable under mismatch (measured across 50+ configurations), and
 settle/relock/recovery records (151ms/198ms/9ms) are bound to an unfiltered extrapolation whose L80/s0.7
 corners are structural. `pi_pm`/`sliding`/`ballistic` remain as undominated baselines (their successors carry
 disclosed regressions). `imm_pi` is the best matched/FPS law of the whole set (accel 4.3px / maneuver 13.6px,
-FPS RMSE 17.1px / event recovery 7ms) but fails the mismatch band outright. `reseed_pi` keeps the shipped
+FPS RMSE 18.1px / event recovery 6ms) but fails the mismatch band outright. `reseed_pi` keeps the shipped
 law's nominal behavior with an evidence-gated seed (exact counts-window junk bound) and ties the zero-reset
 design at the mismatch edge (125.6 vs 125.1) while keeping the tail gains. If a different trade-off is ever
 needed, port the corresponding law's `step()` into `src/core/control.cpp` and `src/core/estimator.cpp`
@@ -1253,9 +1253,14 @@ framerate penalty, so it stays out of the library.
 - **未验证: the USB output side has not been exercised against a real host from this board.** All three
   backends' device bytes, report encoders, endpoint bookkeeping and the P5G auth/signing state machine are
   pinned by `build/pad_test`'s structural assertions; what has *not* been observed here is a real PC reading
-  the emulated 360 pad through XInput, or a real PS5 accepting the presented P5 General device. The
-  dongle-side facts (descriptor identity, feature replies, the signing round trip) are recorded in
-  `docs/p5general/` §14, where the host-acceptance half is explicitly left open.
+  the emulated 360 pad through XInput, or a PS5 completing the P5 General handshake. The p5g device half
+  *has* been accepted once: with `-M p5g` on the board the console enumerated the presented device
+  (`/sys/class/udc/*/state` reads `configured`) and read its definition (the log carries
+  `ℹ [P5G] PS5 读取设备定义 (0x03, wLength 48)`), which is what the 48-byte static reply and the descriptors
+  exist for — but the auth handshake was not observed to start, and the reference firmware's own rule
+  explains why (it begins only after the first physical input, a PS-button press), so pad assignment stays
+  unverified. The dongle-side facts (descriptor identity, feature replies, the signing round trip) are
+  recorded in `docs/p5general/` §14, where the host-acceptance half is explicitly left open.
 - **未验证: the source-mode-change path of the capture rebuild.** A resolution or refresh change across a
   rebuild (mode switch on the source) is code-read only: the rebuild reads `G_FMT` **after** the lock and
   allocates the buffers from that format, and both the ordering and the buffer-size rule are derived from

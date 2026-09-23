@@ -76,8 +76,8 @@ CUSUM_K/C/H = 0.5/3.0/9.0 (σ 倍数)   [原理+测试组选定]
     matched composite 190.65 (step settle 384.7ms / 过冲 3.48px, const_vel
     rmse 0.67px, accel 16.14px, maneuver 20.22px); 失配扫描最坏 116.69
     (L70); 宽延迟 L20-80 全档通过零发散 (L80=139.59); s 失配 0.70-1.30
-    全档通过; relock 483.3ms / 3.16px; fps_eval clean RMSE 24.18px /
-    事件过冲 mean 23.3px worst 78.6px; 60/120fps 差 3.3% (告警延迟按帧计,
+    全档通过; relock 483.3ms / 3.16px; fps_eval clean RMSE 25.80px /
+    事件过冲 mean 22.4px worst 78.6px; 60/120fps 差 3.3% (告警延迟按帧计,
     60fps 时 ms 延迟翻倍); OVERALL 160.21。
     已知代价 (结构性可解释): 软着陆类事件重置后重跑阶跃响应的回弹略升
     (jump_land_stop over 4.3px, bhop worst 33.2px, slide over 20.3px —

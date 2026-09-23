@@ -87,7 +87,7 @@ FF 的 ghost-v̂ 防护 (三层, 辖区不相交):
 评测 (arena 实测, 默认种子): matched 125.8 (step settle 167ms / 过冲 2.75px,
 accel rmse 3.9px, maneuver rmse 18.8px); 失配扫描 L30-70 全过 (最坏 135.0);
 宽延迟 L20-70 全过; s0.70-1.30 全过; relock 219ms; fpsΔ 2.3%; FPS 行为组
-RMSE 21.6px / 事件过冲 mean 29.0px worst 74.0px。
+RMSE 22.9px / 事件过冲 mean 28.9px worst 74.0px。
 
 debug() 字段 (trace 采集为 dbg_* 列, 无副作用, 评测路径不调用):
     ex/ey      Smith 预测误差 ê (px)

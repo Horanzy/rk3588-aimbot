@@ -227,10 +227,13 @@ measured sampling rate and the write-back rule); the host-side verdict for the X
 `powershell -ExecutionPolicy Bypass -File scripts/test/xinput_probe.ps1` (`XInputGetState` rc / packet
 number / decoded fields).
 
-**未验证 on this board**: the USB output side has not yet been exercised against a real host — the
-backends' device bytes, encoders and the P5G auth/signing state machine are pinned by the unit tests,
-while "a real PC reads the emulated pad through XInput" and "a real PS5 accepts the presented device" are
-still open (the dongle-side facts are recorded in `docs/p5general/` §14). Likewise, a source
+**未验证 on this board**: the USB output side has not yet been exercised all the way against a real host
+— the backends' device bytes, encoders and the P5G auth/signing state machine are pinned by the unit
+tests, while "a real PC reads the emulated pad through XInput" is entirely open and the PS5 side is
+accepted only up to the handshake (the console does enumerate the presented device and read its
+definition — `/sys/class/udc/*/state` reads `configured` and the log carries the `0x03` definition read —
+but the auth handshake was not observed to start, which the reference's own "first physical input"
+rule explains; the dongle-side facts are recorded in `docs/p5general/` §14). Likewise, a source
 resolution/refresh change across a capture rebuild is code-read only; the walk-through exercised end to
 end is a lock loss → re-lock at an unchanged mode.
 

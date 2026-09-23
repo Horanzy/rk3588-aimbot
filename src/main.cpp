@@ -264,7 +264,7 @@ int main(int argc, char* argv[]) {
     std::string aim_key=!a_k.empty()?a_k:get_input_with_default("触发键","fire");
     int aim_mode=0;
     if(aim_key=="ads")aim_mode=1; else if(aim_key=="both")aim_mode=2;
-    else if(aim_key!="fire")std::cerr<<"未知触发键, 用 fire\n";
+    else if(aim_key!="fire")std::cerr<<"未知触发键, 用 fire/ads/both\n";
     std::string pv=!a_v.empty()?a_v:get_input_with_default("预览(y/n)","n");
     bool preview=(pv=="y"||pv=="Y");
     if(!preview) unsetenv("DISPLAY");
