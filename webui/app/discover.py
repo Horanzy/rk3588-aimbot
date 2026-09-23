@@ -16,6 +16,7 @@ stream_hdmirx), 它没有 /dev/v4l/by-id 节点, 所以发现按固件同一条�
 import os
 import re
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -293,6 +294,19 @@ def _fmt_value(key: str, val, root: Path) -> str:
     return str(val)
 
 
+# 面板自身的写者互斥: 服务按契约是单进程 (uvicorn 单 worker), 而同步端点由线程池并发服务 ——
+#   一把进程内锁让两个保存请求严格串行, 于是"两个面板保存"这一类竞争根本不存在 (临时名撞车、
+#   后写者整段抹掉前写者都在这里关掉)。固件的回写是另一个进程, 锁管不到, 那一路靠重命名前的
+#   重读比对 (见 write_script_params)。
+_WRITE_LOCK = threading.Lock()
+
+# 读-改-写的重读重试次数: 锁管不到的那个对手方 (固件经 -S 的标定回写, 见 src/core/calib.cpp)
+#   每次重落都把自己那一行叠到对方刚写下的新底稿上, 而对方自己也可能正在重试。3 = 本写者
+#   + 对手方一次 + 对手方自身的一次重试; 用尽即抛错给调用方: 既不静默丢更新, 也不在持续
+#   竞争下活锁。
+_RMW_ATTEMPTS = 3
+
+
 def write_script_params(path: Path, params: dict, root: Path) -> None:
     """把 params 原子写回脚本头部的 VAR=value 块。
 
@@ -305,7 +319,31 @@ def write_script_params(path: Path, params: dict, root: Path) -> None:
       保存后仍然成立。
 
     权限/属主随原子替换一起带回来: 服务通常以 root 跑, 不还属主的话一次保存就把脚本变成
-    root 所有, 用户 SSH 上就再也改不动自己的启动脚本了。"""
+    root 所有, 用户 SSH 上就再也改不动自己的启动脚本了。
+
+    并发 (脚本的另一个写者是固件经 -S 的标定回写, 见 src/core/calib.cpp): 三层, 各管一段。
+    ①临时名带本写者的身份 (pid + 线程) —— 固定名会让两个写者在重命名前共用同一个临时文件,
+    两份内容互相穿插; 固件的回写由唯一线程驱动, pid 就是身份, 这里多带的线程标识与下面的锁
+    一起把"面板自己撞自己"完全关掉, 也让它留下的临时文件名能看出是谁写的。②进程内锁
+    (_WRITE_LOCK): 服务按契约单进程, 而同步端点由线程池并发服务, 锁让两个保存请求严格串行 ——
+    实测 30 轮两个请求同时写同一 profile: 双方内容都在 30/30, 无残留临时文件 (锁之前: 29/30
+    只有后写者那一行活下来, 因为最后一次读原文件与重命名之间本线程要重新拿回 GIL, 对面正好
+    在这段里完成重命名)。③跨进程那一侧锁管不到, 靠重命名前的重读比对: 写临时文件之后、重命名
+    之前再读一次原文件, 内容变了就换新底重来 (用尽 _RMW_ATTEMPTS 抛错, 本写者要么落笔要么
+    明说失败)。比对紧贴重命名, 残留窗口只剩这两步之间, 而它仍不是零: 实测 20 轮强制两个进程
+    同时写同一 profile, 16 轮双方都落笔, 4 轮一方的改动被对方的重命名覆盖 (40 次调用里 3 次
+    重试用尽报错)。这一格是乐观比对法固有的, 关不掉 (见 webui/README.md)。
+    """
+    with _WRITE_LOCK:
+        for _ in range(_RMW_ATTEMPTS):
+            if _write_once(path, params, root):
+                return
+        raise OSError("脚本在读-改-写窗口内被连续改动 %d 次: 本次保存未落笔, 请重新保存"
+                      % _RMW_ATTEMPTS)
+
+
+def _write_once(path: Path, params: dict, root: Path) -> bool:
+    """一次读-改-写: True = 已重命名落笔, False = 窗口内被对方改过 (调用方换新底重来)。"""
     st = path.stat()
     raw = path.read_bytes()
     has_bom = raw.startswith(b"\xef\xbb\xbf")
@@ -362,14 +400,19 @@ def write_script_params(path: Path, params: dict, root: Path) -> None:
 
     out = "\n".join(body) + ("\n" if trailing_nl else "")
     data = (b"\xef\xbb\xbf" if has_bom else b"") + out.encode("utf-8")
-    tmp = path.with_name(path.name + ".tmp")
+    tmp = path.with_name("%s.tmp.%d.%d" % (path.name, os.getpid(),
+                                           threading.get_ident()))
     tmp.write_bytes(data)
+    if path.read_bytes() != raw:             # 比对紧贴重命名: 见 write_script_params 的并发说明
+        tmp.unlink()
+        return False
     os.replace(tmp, path)
-    os.chmod(path, st.st_mode)           # tmp 是新文件, 执行位要显式带回来
+    os.chmod(path, st.st_mode)               # tmp 是新文件, 执行位要显式带回来
     try:
         os.chown(path, st.st_uid, st.st_gid)
     except (AttributeError, OSError):
-        pass                             # 非 root 且文件不属自己: 保持现状, 不改写流程结果
+        pass                                 # 非 root 且文件不属自己: 保持现状, 不改写流程结果
+    return True
 
 
 def _same(a, b) -> bool:

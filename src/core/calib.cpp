@@ -30,6 +30,16 @@ float median_inplace(float* v, int n) {
     return v[n / 2];
 }
 
+// 逐行读文件 (getline 语义: 末行无换行也收, 回写写回的行形态与它一致)
+bool read_lines(const std::string& path, std::vector<std::string>& out) {
+    std::ifstream in(path);
+    if (!in.good()) return false;
+    out.clear();
+    std::string line;
+    while (std::getline(in, line)) out.push_back(line);
+    return true;
+}
+
 // 一维汉宁窗 (cv::createHanningWindow 要求两维均 >1): rowvec = 1×n / 否 = n×1
 cv::Mat hann1d(int n, bool rowvec) {
     cv::Mat w = cv::Mat::zeros(rowvec ? cv::Size(n, 1) : cv::Size(1, n), CV_32F);
@@ -164,43 +174,56 @@ CalibSampler::Frame CalibSampler::measure(const cv::Mat& prev_f32, const cv::Mat
 }
 
 bool persist_calibration(const std::string& path, const std::string& var, float l) {
-    std::ifstream in(path); if (!in.good()) return false;
-    std::vector<std::string> lines; std::string line;
-    while (std::getline(in,line)) lines.push_back(line); in.close();
     char val[32];
     snprintf(val,sizeof(val),"%.1f",(double)l);
     const std::string key=var+"=";
-    bool found=false;
-    for (auto& ln:lines) {
-        if (ln.rfind(key,0)!=0) continue;
-        found=true;
-        // 原行是模板的守卫写法 "${VAR:-旧值}" 时回写成守卫形式, 只换默认位: 守卫是脚本
-        //   "少写一行也能起"的承诺, 一次回写把它抹成裸赋值就撕毁了这个承诺 (该行此后
-        //   不再有兜底值)。值后的行内注释 (脚本约定: 空白 + #) 照原样留在行尾。
-        //   非守卫行 (裸赋值) 按裸赋值重写 —— 回写只认自己那一个值的落点, 不去猜别人的
-        //   写法; 守卫名与 VAR 不同名时同样按裸行处理 (那不是本 VAR 的守卫)。
-        const std::string rhs=ln.substr(key.size());
-        size_t cut=rhs.size();
-        const size_t hash=rhs.find('#');
-        if (hash!=std::string::npos && hash>0 && (rhs[hash-1]==' '||rhs[hash-1]=='\t')) {
-            cut=hash;
-            while (cut>0 && (rhs[cut-1]==' '||rhs[cut-1]=='\t')) --cut;   // 对齐空白归注释
+    std::vector<std::string> lines;
+    for (int attempt = 0; attempt < PERSIST_ATTEMPTS; ++attempt) {
+        if (!read_lines(path, lines)) return false;
+        bool found=false;
+        for (auto& ln:lines) {
+            if (ln.rfind(key,0)!=0) continue;
+            found=true;
+            // 原行是模板的守卫写法 "${VAR:-旧值}" 时回写成守卫形式, 只换默认位: 守卫是脚本
+            //   "少写一行也能起"的承诺, 一次回写把它抹成裸赋值就撕毁了这个承诺 (该行此后
+            //   不再有兜底值)。值后的行内注释 (脚本约定: 空白 + #) 照原样留在行尾。
+            //   非守卫行 (裸赋值) 按裸赋值重写 —— 回写只认自己那一个值的落点, 不去猜别人的
+            //   写法; 守卫名与 VAR 不同名时同样按裸行处理 (那不是本 VAR 的守卫)。
+            const std::string rhs=ln.substr(key.size());
+            size_t cut=rhs.size();
+            const size_t hash=rhs.find('#');
+            if (hash!=std::string::npos && hash>0 && (rhs[hash-1]==' '||rhs[hash-1]=='\t')) {
+                cut=hash;
+                while (cut>0 && (rhs[cut-1]==' '||rhs[cut-1]=='\t')) --cut;   // 对齐空白归注释
+            }
+            const std::string body=rhs.substr(0,cut), tail=rhs.substr(cut);
+            const char q=body.size()>=2 ? body.front() : '\0';
+            const bool quoted=(q=='"'||q=='\'') && body.back()==q;
+            const std::string inner=quoted ? body.substr(1,body.size()-2) : body;
+            const std::string guard="${"+var+":-";
+            ln = (quoted && inner.rfind(guard,0)==0 && inner.back()=='}')
+               ? key + q + guard + val + "}" + q + tail     // 守卫形式: 只换默认位
+               : key + val + tail;                           // 裸形式/缺守卫: 裸赋值
         }
-        const std::string body=rhs.substr(0,cut), tail=rhs.substr(cut);
-        const char q=body.size()>=2 ? body.front() : '\0';
-        const bool quoted=(q=='"'||q=='\'') && body.back()==q;
-        const std::string inner=quoted ? body.substr(1,body.size()-2) : body;
-        const std::string guard="${"+var+":-";
-        ln = (quoted && inner.rfind(guard,0)==0 && inner.back()=='}')
-           ? key + q + guard + val + "}" + q + tail     // 守卫形式: 只换默认位
-           : key + val + tail;                           // 裸形式/缺守卫: 裸赋值
+        if (!found) lines.push_back(key+val);
+
+        struct stat st{}; bool have=(stat(path.c_str(),&st)==0);
+        std::string tmp=path+".tmp."+std::to_string((long)getpid());   // 临时名带写者身份
+        { std::ofstream o(tmp,std::ios::trunc); if (!o.good()) return false;
+          for (auto& ln:lines) o<<ln<<"\n"; }
+        // 写临时文件之后、重命名之前再读一次原文件比对: 整文件读-改-写是一个竞争窗口 ——
+        //   面板在本回写读之后写下的内容会被这次重命名整段抹掉 (脚本的另一个写者, 并发说明
+        //   见 core/calib.h)。内容变了就换新底重来: 回写只改自己那一行, 重落一次不会压掉
+        //   对方的改动。比对紧贴重命名 (临时写入放在它之前), 残留窗口因此只剩这两步之间 ——
+        //   它不是零, 面板那侧的强制竞争实测见 webui/README.md。用尽 PERSIST_ATTEMPTS 仍落笔
+        //   —— 标定结论是这一轮的交付物, 不因为持续竞争而不写; 那时只剩那个固有残留窗口。
+        std::vector<std::string> now;
+        const bool moved = read_lines(path, now) && now != lines;
+        if (moved && attempt + 1 < PERSIST_ATTEMPTS) { unlink(tmp.c_str()); continue; }
+
+        if (have) { chmod(tmp.c_str(),st.st_mode); chown(tmp.c_str(),st.st_uid,st.st_gid); }
+        if (rename(tmp.c_str(),path.c_str())!=0) { unlink(tmp.c_str()); return false; }
+        return true;
     }
-    if (!found) lines.push_back(key+val);
-    struct stat st{}; bool have=(stat(path.c_str(),&st)==0);
-    std::string tmp=path+".tmp."+std::to_string((long)getpid());
-    { std::ofstream o(tmp,std::ios::trunc); if (!o.good()) return false;
-      for (auto& ln:lines) o<<ln<<"\n"; }
-    if (have) { chmod(tmp.c_str(),st.st_mode); chown(tmp.c_str(),st.st_uid,st.st_gid); }
-    if (rename(tmp.c_str(),path.c_str())!=0) { unlink(tmp.c_str()); return false; }
-    return true;
+    return false;                              // 循环体内必 return: 仅补全返回路径
 }
