@@ -189,29 +189,37 @@ static bool ep0_send_string(UsbRawSession& s, int index, int wLength) {
 
 // GET_DESCRIPTOR 描述符字节源: 设备 / 限定符 / 配置 (含 other-speed 的类型字节
 //   翻转, USB 2.0 §9.6.4) / 报告描述符 (类描述符经标准 GET_DESCRIPTOR 取,
-//   HID 1.11 §7.1)。返回字节数; 不认识的类型与设备未定义的描述符返回 -1
-//   (交 STALL)。
-static int desc_bytes(const UsbRawDeviceDef& d, const usb_ctrlrequest& c, uint8_t* out) {
+//   HID 1.11 §7.1)。返回 true 时长度经出参给出; 返回 false = 本表没有这个描述符
+//   (不认识的类型, 或设备未定义它), 调用方照"本表不接"STALL。这个判断留在本地:
+//   应答路径的长度字段是 __u32, 拿 −1 当"不认识"送进去会变成 0xFFFFFFFF, 等于把
+//   拒绝的理由寄在"内核会驳回一个非法长度"上。未定义的描述符回 STALL 是规范
+//   允许的答复 (与下面仅全速设备对限定符的处理同一口径)。
+static bool desc_bytes(const UsbRawDeviceDef& d, const usb_ctrlrequest& c,
+                       uint8_t* out, int* len) {
     switch (c.wValue >> 8) {
     case USB_DT_DEVICE:
         memcpy(out, &d.device, USB_DT_DEVICE_SIZE);
-        return USB_DT_DEVICE_SIZE;
+        *len = USB_DT_DEVICE_SIZE;
+        return true;
     case USB_DT_DEVICE_QUALIFIER:
-        if (!d.qualifier) return -1;                  // 仅全速设备: 无限定符, 规范答复是 STALL
+        if (!d.qualifier) return false;               // 仅全速设备: 无限定符, 规范答复是 STALL
         memcpy(out, d.qualifier, sizeof(usb_qualifier_descriptor));
-        return (int)sizeof(usb_qualifier_descriptor);
+        *len = (int)sizeof(usb_qualifier_descriptor);
+        return true;
     case USB_DT_CONFIG:
     case USB_DT_OTHER_SPEED_CONFIG:
         memcpy(out, d.config, d.config_len);
         if ((c.wValue >> 8) == USB_DT_OTHER_SPEED_CONFIG)
             out[1] = USB_DT_OTHER_SPEED_CONFIG;           // 同一配置节, 仅类型字节按规范翻转
-        return d.config_len;
+        *len = d.config_len;
+        return true;
     case HID_DT_REPORT:
-        if (!d.report_desc) return -1;                // 非 HID 设备无报告描述符
+        if (!d.report_desc) return false;             // 非 HID 设备无报告描述符
         memcpy(out, d.report_desc, d.report_desc_len);
-        return d.report_desc_len;
+        *len = d.report_desc_len;
+        return true;
     default:
-        return -1;
+        return false;
     }
 }
 
@@ -220,12 +228,13 @@ static int desc_bytes(const UsbRawDeviceDef& d, const usb_ctrlrequest& c, uint8_
 //   循环特判 (状态阶段之后才 CONFIGURE, 见 set_configuration)。
 static bool standard_request(UsbRawSession& s, const usb_ctrlrequest& c) {
     uint8_t buf[USBRAW_DESC_MAX];
-    int len = -1;
+    int len = 0;
     switch (c.bRequest) {
     case USB_REQ_GET_DESCRIPTOR:
         if ((c.wValue >> 8) == USB_DT_STRING)
             return ep0_send_string(s, c.wValue & 0xff, c.wLength);
-        len = desc_bytes(*s.dev, c, buf);
+        if (!desc_bytes(*s.dev, c, buf, &len))
+            return false;                             // 表里没有这个描述符 → 本表不接 (STALL)
         break;
     case USB_REQ_GET_STATUS:
         buf[0] = 0; buf[1] = 0;                           // 设备=总线供电无远程唤醒 / 接口=0 / 端点=无 HALT
