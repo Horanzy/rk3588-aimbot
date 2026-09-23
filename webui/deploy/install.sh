@@ -43,9 +43,9 @@ fi
 # ---- 生成 unit (User=root 是刻意的, 理由见 webui/README.md 权限模型一节) ----
 # 排序只要求 network.target (弱前提): 本服务只**监听** 0.0.0.0, 通配绑定不需要任何
 #   已配置的地址、也不需要任何上游可达 —— network-online.target 等的是
-#   NetworkManager-wait-online, 那是"地址配好且能上网"的强前提, 板上实测要 ~90s,
-#   于是面板开机后 ~75s 才起得来。弱前提是本服务的正确形状: 它既不消费网络也不
-#   依赖上游, 界面晚起纯属白等。
+#   NetworkManager-wait-online, 即"地址配好且能上网"的强前提: 板端 journal 里
+#   network.target 10.3s 就绪, 而 wait-online 自己等满 60s 才失败、面板的起点被
+#   推到 70.3s。弱前提是本服务的正确形状: 它既不消费网络也不依赖上游。
 cat > /etc/systemd/system/$SERVICE.service <<EOF
 [Unit]
 Description=aimbot WebUI (RK3588 aimbot management panel)

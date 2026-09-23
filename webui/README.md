@@ -64,9 +64,10 @@ sudo journalctl -u aimbot-webui -n 20 --no-pager
 
 unit 的排序只声明 `After/Wants=network.target`，不声明 `network-online.target`：面板只**监听**
 `0.0.0.0`，通配绑定不需要任何已配置的地址、也不消费任何上游 —— 而 `network-online.target` 要等
-`NetworkManager-wait-online`（板端实测约 90 s）才成立，面板因此会拖到开机后约 75 s 才可用。对一个
-只监听的服务，弱前提就是正确前提：晚起的那一分钟是白等。改 unit 后
-`sudo systemctl daemon-reload && sudo systemctl restart aimbot-webui`。
+`NetworkManager-wait-online`。板端 journal 里的实测口径：`network.target` 在开机 10.3 s 就绪，
+而 `NetworkManager-wait-online` 自己等满 60 s 才失败、`network-online.target` 到 70.3 s 才成立，
+面板的起点就是它（70.34 s）。对一个只监听的服务，弱前提就是正确前提：晚起的那一分钟是白等。
+改 unit 后 `sudo systemctl daemon-reload && sudo systemctl restart aimbot-webui`。
 
 平台前提（`install.sh` 检查并补齐，逐条理由见该脚本的注释）：
 
