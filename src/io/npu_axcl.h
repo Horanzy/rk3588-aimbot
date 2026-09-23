@@ -45,7 +45,7 @@
 //    映射, 它的缓存一致性由采集层负责 (见 io/rga_pp.h), 让 H2D 的源永远是普通主机内存,
 //    这条路径就不依赖别人有没有做失效化。
 //
-//  tick 的分段耗时 (µs) 由调用方按需取 (NpuTick): pack = 输入打包, h2d / exec / d2h =
+//  tick 的分段耗时 (µs) 由调用方按需取 (NpuTick): h2d / exec / d2h =
 //    三段硬件路径, decode = core/detect 的解码。固件按固定间隔打日志, 探针取百分位。
 // ============================================================================
 
@@ -80,12 +80,12 @@ struct NpuTensor {
 //   d2h_us 总和, 只是不进逐张量表 (表只给诊断用, 预算用的是总和)。
 constexpr int NPU_MAX_OUT = 16;
 struct NpuTick {
-    double pack_us = 0, h2d_us = 0, exec_us = 0, d2h_us = 0, decode_us = 0;
+    double h2d_us = 0, exec_us = 0, d2h_us = 0, decode_us = 0;
     double d2h_each_us[NPU_MAX_OUT] = {};   // 逐保留输出的 D2H (下标 = 保留顺序)
     int    d2h_n = 0;                       // 上面有效的前多少项
     size_t dets = 0;       // 解码出的候选数 (未过 NMS)
     bool   ok = true;      // 三段任一步失败即 false (该 tick 不产生检测)
-    double total_us() const { return pack_us + h2d_us + exec_us + d2h_us + decode_us; }
+    double total_us() const { return h2d_us + exec_us + d2h_us + decode_us; }
 };
 
 // 进程级设备初始化 (幂等): axclInit(0) → axclrtGetDeviceList → SetDevice →
@@ -123,9 +123,10 @@ public:
     //   下标是 outputs() 里的位置, 非保留输出返回 nullptr。
     const void* output_host(size_t idx) const;
 
-    // 一次推理 tick: 打包输入 → H2D → execute → 逐保留输出 D2H → 解码 (core/detect)。
+    // 一次推理 tick: H2D (直读 rgb_hwc, 无中间拷贝) → execute → 逐保留输出 D2H → 解码 (core/detect)。
     //   返回**候选框** (不含 NMS, 不含裁剪平移 —— 与 detect.h 的约定一致, 归调用方)。
-    //   rgb_hwc = 边长 input_side() 的 RGB 字节流 (input_side()²×3 字节)。
+    //   rgb_hwc = 边长 input_side() 的 RGB 字节流 (input_side()²×3 字节), 本函数**直接读它**
+//   (它就是 RGA 目的缓冲的映射), 开头不再有中间打包拷贝。
     std::vector<Detection> run(const uint8_t* rgb_hwc, int num_classes, float conf_thr,
                                int want_cls, NpuTick* tick = nullptr);
 
@@ -136,7 +137,7 @@ private:
     std::string path_;
     std::vector<NpuTensor> in_, out_;
     std::vector<void*> in_dev_, out_dev_;       // 设备缓冲 (全部输入/输出)
-    std::vector<void*> in_host_, out_host_;     // 主机暂存 (输入 + 保留的输出)
+    std::vector<void*> out_host_;               // 主机暂存 (保留的输出)
     std::vector<int>   kept_;                   // 保留输出在 out_ 里的下标
     std::vector<const float*> keep_ptrs_;       // 保留输出的主机暂存 (喂给解码器)
     std::vector<OutputLayout> keep_layouts_;    // 与 keep_ptrs_ 一一对应的布局

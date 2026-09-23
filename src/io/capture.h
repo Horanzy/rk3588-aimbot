@@ -96,7 +96,7 @@ constexpr float NMS_IOU_THR = 0.45f;
 // 一帧推理的产物 (窗口域坐标)
 struct PipelineTick {
     std::vector<Detection> dets;    // 窗口域 (W) 坐标, 已 NMS (未过 FOV 门)
-    NpuTick npu;                    // pack/H2D/exec/D2H/解码 逐段耗时
+    NpuTick npu;                    // H2D/exec/D2H/解码 逐段耗时
     double  rga_us   = 0;           // 本帧 RGA 合计 (一次或两次 improcess)
     double  total_us = 0;           // 本帧 RGA + NPU 的合计
     bool    ok = false;             // 本帧走完 (RGA 与 NPU 都成功)

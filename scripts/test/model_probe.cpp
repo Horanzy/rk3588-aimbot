@@ -433,8 +433,8 @@ static int probe_main(int argc, char** argv) {
     // ---------------- 计时 ----------------
     const int warm = 20;
     for (int i = 0; i < warm; ++i) s.run(in.data(), classes, conf, want_cls, nullptr);
-    std::vector<double> vpack, vh2d, vexec, vd2h, vdec, vtot;
-    vpack.reserve(iters); vh2d.reserve(iters); vexec.reserve(iters);
+    std::vector<double> vh2d, vexec, vd2h, vdec, vtot;
+    vh2d.reserve(iters); vexec.reserve(iters);
     vd2h.reserve(iters); vdec.reserve(iters); vtot.reserve(iters);
     // 逐保留输出的 D2H (每张量一张表; 下标 = 保留顺序, 与 IO 契约段的行序一致)
     std::vector<std::vector<double>> veach(s.kept_outputs());
@@ -442,13 +442,12 @@ static int probe_main(int argc, char** argv) {
     for (int i = 0; i < iters; ++i) {
         NpuTick t;
         s.run(in.data(), classes, conf, want_cls, &t);
-        vpack.push_back(t.pack_us); vh2d.push_back(t.h2d_us); vexec.push_back(t.exec_us);
+        vh2d.push_back(t.h2d_us); vexec.push_back(t.exec_us);
         vd2h.push_back(t.d2h_us); vdec.push_back(t.decode_us); vtot.push_back(t.total_us());
         for (int k = 0; k < t.d2h_n && k < (int)veach.size(); ++k) veach[k].push_back(t.d2h_each_us[k]);
     }
     printf("\n计时 (%d 次, 预热 %d 次; 单位 µs):\n", iters, warm);
     printf("  %-8s %8s %8s %8s %8s %8s\n", "段", "avg", "p50", "p90", "p99", "max");
-    row("pack", vpack);
     row("H2D", vh2d, s.in_bytes());
     row("execute", vexec);
     row("D2H", vd2h, s.out_bytes());

@@ -293,7 +293,7 @@ void ai_thread(std::string model_path, int target_cls, int num_classes,
 
     // 检测率与逐段成本 (每 60s 一行: 检测率 = 走完整条链的帧/s —— 面板画的就是它)
     long   fps_cnt = 0;
-    double sum_rga = 0, sum_npu = 0, sum_pack = 0, sum_h2d = 0, sum_exec = 0, sum_d2h = 0,
+    double sum_rga = 0, sum_npu = 0, sum_h2d = 0, sum_exec = 0, sum_d2h = 0,
            sum_dec = 0, sum_wait = 0, sum_fence = 0;
     std::vector<double> ages;               // 本窗口的帧龄 (帧时间戳 → 检测就绪, ms)
     auto fps_t0 = std::chrono::steady_clock::now();
@@ -424,7 +424,7 @@ void ai_thread(std::string model_path, int target_cls, int num_classes,
             //   的凭据, 见 io/hdmi_in.h) 与排空/归还, 故一并报出, 三者之和就是帧周期。
             ++fps_cnt;
             sum_rga += tick.rga_us; sum_npu += tick.npu.total_us();
-            sum_pack += tick.npu.pack_us; sum_h2d += tick.npu.h2d_us;
+            sum_h2d += tick.npu.h2d_us;
             sum_exec += tick.npu.exec_us; sum_d2h += tick.npu.d2h_us;
             sum_dec += tick.npu.decode_us;
             inf_us_sum += tick.npu.total_us();      // 标定回写要加的那一腿 (见上面的说明)
@@ -445,14 +445,14 @@ void ai_thread(std::string model_path, int target_cls, int num_classes,
                 const uint64_t d_to = sc.fence_timeouts - src_prev.fence_timeouts;
                 const double d_us = sc.fence_us_sum - src_prev.fence_us_sum;
                 printf("[AI FPS] %d fps (源 %.2fHz, 窗口 %.1fs) | 取帧 %.2fms (其中等 fence "
-                       "%.2f) | RGA %.2fms | NPU %.2fms (pack %.2f H2D %.2f exec %.2f D2H "
+                       "%.2f) | RGA %.2fms | NPU %.2fms (H2D %.2f exec %.2f D2H "
                        "%.2f 解码 %.2f) | 合计 %.2fms/帧 | 帧龄(帧时间戳→检测就绪) p50 %.1f "
                        "p99 %.1f max %.1fms | 等 fence %llu 次 (成功 %llu 次 均值 %.2fms) | "
                        "超时 %llu 次 (白等 %llu×%dms) | 失锁 %llu 次 停流 %llu 次 | 重建 "
                        "%llu 成功 %llu 失败 | 推理段累计均值 %.2fms (%ld 帧 — 标定回写要加的"
                        "那一腿)\n",
                        (int)((double)fps_cnt / win_s), src_hz, win_s, sum_wait / n,
-                       sum_fence / n, sum_rga / n, sum_npu / n, sum_pack / n, sum_h2d / n,
+                       sum_fence / n, sum_rga / n, sum_npu / n, sum_h2d / n,
                        sum_exec / n, sum_d2h / n, sum_dec / n,
                        (sum_wait + sum_rga + sum_npu) / n, pct(ages, 50), pct(ages, 99),
                        ages.empty() ? 0.0 : *std::max_element(ages.begin(), ages.end()),
@@ -467,7 +467,7 @@ void ai_thread(std::string model_path, int target_cls, int num_classes,
                        (unsigned long long)(sc.rearm_fail - src_prev.rearm_fail),
                        inf_n ? inf_us_sum / (double)inf_n / 1000.0 : 0.0, inf_n);
                 fflush(stdout);
-                fps_cnt = 0; sum_rga = sum_npu = sum_pack = sum_h2d = sum_exec = sum_d2h
+                fps_cnt = 0; sum_rga = sum_npu = sum_h2d = sum_exec = sum_d2h
                     = sum_dec = sum_wait = sum_fence = 0;
                 ages.clear(); fps_t0 = now;
                 src_prev = sc;

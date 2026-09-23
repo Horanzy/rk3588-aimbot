@@ -160,6 +160,15 @@ bool NpuSession::open(const std::string& model_path, std::string* err) {
         }
         input_side_ = (t.dims.d[1] == t.dims.d[2]) ? (int)t.dims.d[1] : 0;
         in_bytes_ = t.bytes;
+        // H2D 直读调用方的缓冲 (见 run): 那条路要求输入字节数恰为 边长²×3, 否则会越读
+        if (input_side_ > 0 && in_bytes_ != (size_t)input_side_ * (size_t)input_side_ * 3) {
+            char b[192];
+            snprintf(b, sizeof b,
+                     "输入字节数 %zu 与边长 %d 的平方×3 (%zu) 不符: H2D 直读调用方缓冲, "
+                     "尺寸必须与契约一致",
+                     in_bytes_, input_side_, (size_t)input_side_ * (size_t)input_side_ * 3);
+            return bad(b);
+        }
         in_.push_back(t);
     }
     // 非方形输入: 网格步长推不出来 (DFL 头与端到端/网格头的几何判定都要方形边长),
@@ -221,15 +230,12 @@ bool NpuSession::alloc_buffers(std::string* err) {
     auto bad = [&](const std::string& m) { if (err) *err = m; return false; };
     in_dev_.assign(in_.size(), nullptr);
     out_dev_.assign(out_.size(), nullptr);
-    in_host_.assign(in_.size(), nullptr);
     out_host_.assign(out_.size(), nullptr);
     for (size_t i = 0; i < in_.size(); ++i) {
         if (axclrtMalloc(&in_dev_[i], in_[i].bytes, AXCL_MEM_MALLOC_HUGE_FIRST))
             return bad("输入设备缓冲分配失败");
         if (axclrtEngineSetInputBufferByIndex(io_, (uint32_t)i, in_dev_[i], in_[i].bytes))
             return bad("SetInputBuffer 失败");
-        in_host_[i] = malloc(in_[i].bytes);
-        if (!in_host_[i]) return bad("输入主机缓冲分配失败");
     }
     for (size_t i = 0; i < out_.size(); ++i) {
         if (axclrtMalloc(&out_dev_[i], out_[i].bytes, AXCL_MEM_MALLOC_HUGE_FIRST))
@@ -249,9 +255,8 @@ bool NpuSession::alloc_buffers(std::string* err) {
 void NpuSession::free_buffers() {
     for (void* p : in_dev_)  if (p) axclrtFree(p);
     for (void* p : out_dev_) if (p) axclrtFree(p);
-    for (void* p : in_host_)  free(p);
     for (void* p : out_host_) free(p);
-    in_dev_.clear(); out_dev_.clear(); in_host_.clear(); out_host_.clear();
+    in_dev_.clear(); out_dev_.clear(); out_host_.clear();
     keep_ptrs_.clear();
 }
 
@@ -273,10 +278,11 @@ std::vector<Detection> NpuSession::run(const uint8_t* rgb_hwc, int num_classes, 
     if (!ready_) { if (tick) tick->ok = false; return dets; }
     NpuTick t{};
 
+    // H2D 直接从调用方的缓冲读 —— 它就是 RGA 目的缓冲的映射, 与模型输入同尺寸同布局,
+    //   中间再拷一份只是把同一批字节搬两遍, 而那一遍每帧都压在关键路径上。源缓冲的尺寸
+    //   契约 (in_bytes_ == 边长²×3) 在 open 时已核 (见那里的注释)。
     const double t0 = now_us();
-    memcpy(in_host_[0], rgb_hwc, in_bytes_);      // 输入打包 (小图; 源可能是 dma-buf 映射)
-    const double t1 = now_us();
-    if (axclrtMemcpy(in_dev_[0], in_host_[0], in_bytes_, AXCL_MEMCPY_HOST_TO_DEVICE))
+    if (axclrtMemcpy(in_dev_[0], (void*)rgb_hwc, in_bytes_, AXCL_MEMCPY_HOST_TO_DEVICE))
         { t.ok = false; if (tick) *tick = t; return dets; }
     const double t2 = now_us();
     if (axclrtEngineExecute(model_id_, ctx_, 0, io_))
@@ -298,7 +304,7 @@ std::vector<Detection> NpuSession::run(const uint8_t* rgb_hwc, int num_classes, 
                           input_side_);
     const double t5 = now_us();
 
-    t.pack_us = t1 - t0; t.h2d_us = t2 - t1; t.exec_us = t3 - t2;
+    t.h2d_us = t2 - t0; t.exec_us = t3 - t2;
     t.d2h_us = t4 - t3; t.decode_us = t5 - t4; t.dets = dets.size();
     if (tick) *tick = t;
     return dets;

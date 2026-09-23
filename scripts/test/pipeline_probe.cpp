@@ -4,7 +4,7 @@
 //    用**生产路径本身** (io/capture.h 的 CapturePipeline 与 io/hdmi_in 的取帧层)
 //    跑两个问题:
 //      (1) 活信号: 连采 N 帧走完整条链 (取帧 → RGA 窗口 → [二级裁剪] → NPU → 解码
-//          → NMS), 报实测检测帧率与逐段耗时 (RGA / pack / H2D / execute / D2H / 解码)
+//          → NMS), 报实测检测帧率与逐段耗时 (RGA / H2D / execute / D2H / 解码)
 //          与帧龄百分位 —— 桌面画面上的候选数应当为 0, 这一段的用途是"链走得通、
 //          每段多贵";
 //      (2) 真图检测: 取一帧**真实的采集缓冲** (驱动给的 dmabuf, 几何/行距都来自驱动),
@@ -112,7 +112,7 @@ int main(int argc, char** argv) {
     };
 
     // ---- (1) 活信号: 检测帧率 + 逐段耗时 + 帧龄 ----
-    std::vector<double> rga, npu, age, pack, h2d, exec, d2h, dec;
+    std::vector<double> rga, npu, age, h2d, exec, d2h, dec;
     int n = 0, nfail = 0, ndet_total = 0;
     const double t0 = now_ms();
     for (int i = 0; i < frames && global_running; ++i) {
@@ -125,7 +125,7 @@ int main(int argc, char** argv) {
         if (run_one(src, nullptr, &t)) {
             ++n;
             rga.push_back(t.rga_us); npu.push_back(t.npu.total_us());
-            pack.push_back(t.npu.pack_us); h2d.push_back(t.npu.h2d_us);
+            h2d.push_back(t.npu.h2d_us);
             exec.push_back(t.npu.exec_us); d2h.push_back(t.npu.d2h_us);
             dec.push_back(t.npu.decode_us);
             // 帧龄 = 帧时间戳 → 检测就绪 (时间戳与 CLOCK_MONOTONIC 同源, 取帧层已校验)
@@ -136,19 +136,19 @@ int main(int argc, char** argv) {
     }
     const double wall = now_ms() - t0;
     const Stat sr = summarize(rga), sn = summarize(npu), sa = summarize(age),
-               sp = summarize(pack), sh = summarize(h2d), se = summarize(exec),
+               sh = summarize(h2d), se = summarize(exec),
                sd = summarize(d2h), sk = summarize(dec);
     fprintf(stdout,
             "\n[1] 活信号 (%d 帧走完整条链 / 取帧失败 %d, 墙钟 %.0fms)\n"
             "    检测帧率 %.1f fps\n"
             "    RGA        avg %.2f p50 %.2f p99 %.2f max %.2f µs\n"
             "    NPU 合计   avg %.2f p50 %.2f p99 %.2f max %.2f µs\n"
-            "      pack %.2f | H2D %.2f | exec %.2f | D2H %.2f | 解码 %.2f µs (avg)\n"
+            "      H2D %.2f | exec %.2f | D2H %.2f | 解码 %.2f µs (avg)\n"
             "    帧龄       avg %.2f p50 %.2f p99 %.2f max %.2f ms (帧时间戳 → 检测就绪)\n"
             "    检测候选合计 %d (窗口 %d 上的桌面画面)\n",
             n, nfail, wall, wall > 0 ? 1000.0 * (double)n / wall : 0.0,
             sr.avg, sr.p50, sr.p99, sr.mx, sn.avg, sn.p50, sn.p99, sn.mx,
-            sp.avg, sh.avg, se.avg, sd.avg, sk.avg, sa.avg, sa.p50, sa.p99, sa.mx,
+            sh.avg, se.avg, sd.avg, sk.avg, sa.avg, sa.p50, sa.p99, sa.mx,
             ndet_total, pipe.window_side());
 
     // ---- (2) 真图: 贴进一帧真实采集缓冲的中心窗口, 再走同一条链 ----
