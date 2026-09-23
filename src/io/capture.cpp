@@ -553,8 +553,7 @@ void ai_thread(std::string model_path, int target_cls, int num_classes,
                 // 行内同样写 L=: 面板的延迟卡片取的就是这条 (它显示"在用的那一格"),
                 //   而回写与运行态生效的是同一个数 —— 卡片、脚本、律三处一致
                 printf("[标定] L=%.1f ms (物理环路延迟; 推理段均值 %.2fms/%ld 帧仅供参考 —— "
-                       "律的锚点是帧交付时刻, 其后的处理由 age 承载, 不进 L)
-",
+                       "律的锚点是帧交付时刻, 其后的处理由 age 承载, 不进 L)\n",
                        (double)l_write, inf_ms, inf_n);
                 if (!persist_path.empty()) {
                     // 回写 VAR 名由输出模式在 main 里选好 (三套输出各一格延迟)
