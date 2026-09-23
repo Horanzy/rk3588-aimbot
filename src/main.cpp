@@ -53,6 +53,10 @@
 //    DEFAULT_FREQ, core/state.h); 其余按归属分模块 — core/ (共享状态/控制律/
 //    估计器/标定/检测解析), io/ (采集与推理/鼠标输入与 USB 输出/热参)。
 //
+//  单实例: 本进程独占三样资源 —— UDC (raw_gadget 会话 open 即绑)、采集设备、AXCL
+//    卡, 故参数解析之后、碰任何设备之前先在 /run/aimbot.lock 取一把 flock (core/
+//    proc_util); 锁已在别人手里就点出它的 pid 与命令行并以非 0 退出。
+//
 //  收尾用 _Exit 跳过静态析构: axcl 的库在静态析构里 abort (实测 RC=134, 输出已打印完
 //    之后), 否则一次正常退出会变成非 0 退出码, 还可能吃掉尾部输出。
 // ============================================================================
@@ -77,6 +81,7 @@
 
 #include "core/calib.h"
 #include "core/control.h"
+#include "core/proc_util.h"
 #include "core/state.h"
 #include "io/calib_run.h"
 #include "io/capture.h"
@@ -183,6 +188,11 @@ int main(int argc, char* argv[]) {
             return 0;
         }
     }
+
+    // 实例闸门: 独占资源 (UDC / 采集设备 / NPU 卡) 一次只归一个进程, 故在碰任何
+    //   设备之前先取锁 —— 第二个实例今天会撞在 UDC 上报 EBUSY, 而那句话说不出是
+    //   谁占着; 取不到锁时这里点出持有者的 pid 与命令行, 退出码非 0。
+    if (!instance_lock_acquire()) return 1;
 
     std::string model_path;
     if (!a_m.empty()) { model_path=a_m;

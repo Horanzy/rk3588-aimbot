@@ -26,7 +26,7 @@ LIBS="-L/usr/lib/axcl -laxcl_rt -laxcl_pkg -lrga"
 PTHREAD="-pthread"
 
 # 模块清单 = src/ 下的全部可移植编译单元 (入口 main 与 core/io 各 .cpp 逐一对应)
-MODULES="main core/control core/estimator core/calib core/detect core/state \
+MODULES="main core/control core/estimator core/calib core/detect core/state core/proc_util \
          io/hid_mouse io/usbraw io/hotctl io/calib_run io/pad_input io/pad_output \
          io/pad_xinput io/pad_p5g io/hdmi_in io/rga_pp io/npu_axcl io/capture"
 
