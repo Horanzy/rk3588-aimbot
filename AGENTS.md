@@ -182,8 +182,19 @@ reading the diff here.
   kernel's own curve sits on its first level, 19.6 %, which is below this fan's start threshold, so the
   fan simply does not turn, and the SoC idles at 37–48 °C in that state (measured over this
   repository's runs). If a duty ever does have to be pinned, it has to happen without touching the
-  binding — drive the bound driver's hwmon `pwm1`, or keep the module from loading in the first place —
-  未验证: neither path has been measured on this board.
+  binding — drive the bound driver's hwmon `pwm1`, or keep the module from loading in the first place.
+  Of those two the first is measured **not to hold**: a duty written to `pwm1` while the driver is bound
+  is rewritten by that driver's own check (255 → 50 within 3 s once a check fired; in another run the
+  same write held for 5 s), so it carries no pinned value — the unstable end of the pair, not the fatal
+  one. The second (keep the module from loading) is still unmeasured.
+  What a temperature-aware path would need as its input **is** readable from userspace, though: the
+  AX650N's own junction temperature comes back from `axclrtGetDeviceProperties()` in the `temperature`
+  member — millidegrees Celsius, the same unit the thermal zones use, device id taken from
+  `axclrtGetDeviceList` (which reports **1** on this board, not 0) and root needed for `/dev/axcl_host`.
+  Measured in this repository's runs, the card is the hot chip and this fan does reach it: 61 °C against
+  the SoC's 50–53 °C in the same window while the fan sat stalled, falling to 57.8 °C with the duty
+  driven to full (that pair of readings predates the unbind that wedged the board, and nothing has
+  measured them since).
 - The board image's own facts, for when a prerequisite fails: receiver node
   `/sys/class/video4linux/videoN/name` = `stream_hdmirx` (driver `rk_hdmirx`; the node number is not
   stable across reboots, which is why the default is name resolution), `raw_gadget` loadable with
