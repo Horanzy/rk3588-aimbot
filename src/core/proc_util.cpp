@@ -155,7 +155,8 @@ bool instance_lock_acquire() {
     }
     // 两轮: 第一轮失败且持有者是本库自己的进程时接管它, 第二轮取锁即成功。第二轮的
     //   失败路径就是终局 (外人持有, 或接管之后锁仍取不到)。
-    for (int attempt = 0; attempt < 2; ++attempt) {
+    bool remnant_tried = false;
+    for (int attempt = 0; attempt < 4; ++attempt) {   // 上限: 两次 takeover 尝试 + 一次残骸重建
         if (flock(fd, LOCK_EX | LOCK_NB) == 0) {
             // 内容 = 自己的 pid, 给后来者点名用。锁本身与它无关 (内核在 fd 上记账),
             //   故写失败只是少一行信息, 不影响独占性 —— 报警告, 不失败。
@@ -172,6 +173,27 @@ bool instance_lock_acquire() {
         // 持有者以"谁打开着锁文件"为准 —— 锁文件的内容可能过期 (上一个实例被 kill -9 或
         //   崩溃时它不会自己清), 内容只在扫不到持有者时作为 pid 提示用。
         auto holders = proc_fd_holders(INSTANCE_LOCK_PATH, (int)getpid());
+        // 残骸: 内核锁表把锁记在一个**已不存在的 pid** 上, 而没有任何活进程打开着它 (实测:
+        //   持有者进程在退出途中被带走时会留下这种状态) —— 此时没有任何东西可 kill, 只能
+        //   把锁文件本身换成新 inode。判定用两个独立可观测量同时成立, 且只做一次: 扫不到
+        //   持有者 + 锁文件里的 pid 不可达。代价有界 (真有两个实例并存的话, UDC 那一层会
+        //   立刻报出来), 而不做这一步的表现是"永久起不来、又没有可 kill 的目标"。
+        if (!remnant_tried && holders.empty()) {
+            char b[32] = {0};
+            const ssize_t rn = pread(fd, b, sizeof(b) - 1, 0);
+            const int rpid = rn > 0 ? atoi(b) : 0;
+            if (rpid > 0 && kill(rpid, 0) != 0 && errno == ESRCH) {
+                remnant_tried = true;
+                std::cerr << "[接管] 锁文件是残骸 (锁记在已不存在的 pid " << rpid
+                          << " 上, 无活进程打开它) → 重建锁文件\n";
+                ::unlink(INSTANCE_LOCK_PATH);
+                ::close(fd);
+                fd = open(INSTANCE_LOCK_PATH, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+                if (fd >= 0) continue;
+                std::cerr << "❌ 重建锁文件后仍打不开: " << strerror(errno) << "\n";
+                return false;
+            }
+        }
         int pid = holders.size() == 1 ? holders[0].first : 0;
         if (pid == 0) {
             char buf[32] = {0};
