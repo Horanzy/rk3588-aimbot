@@ -178,6 +178,21 @@ reading the diff here.
   `journalctl --list-boots` (the retained boots) and `journalctl -b -1 -e` (the tail of the previous
   one); when it is missing, `journalctl --disk-usage` and `journalctl -u systemd-journald -b` say
   whether it was ever written.
+- **A UDC bound by a dead raw_gadget session has one recovery: unbind/rebind dwc3.** The firmware's
+  EBUSY line names two occupations — a kernel configfs gadget instance and a live process holding
+  `/dev/raw-gadget` — but there is a third: a process killed while an endpoint ioctl is in flight
+  (the panel's start-time cleanup escalates SIGTERM → SIGKILL after 5 s, `webui/app/proc.py`
+  `kill_all`) leaves its dwc3 ep dequeue stalled (kernel WARNING in `__dwc3_stop_active_transfer`),
+  and the UDC stays bound by a session with no process behind it — the holder scan finds nobody,
+  configfs is empty, and no script step can clear it. Tell it apart by `sudo dmesg | tail`:
+  `couldn't find an available UDC or it's busy` with no holder, while
+  `/sys/class/udc/*/state` is frozen at a bus state. Recovery (measured to work end to end; the
+  forced unbind makes the stranded ioctl return, which the kernel answers with a one-shot oops
+  note from the dying thread — loud, survived):
+  `echo fc000000.usb | sudo tee /sys/bus/platform/drivers/dwc3/unbind` then the same into
+  `.../bind`; the UDC re-registers free and the next start binds normally. On this kernel the
+  `state` file does not return to `not attached` after a normal session release either — a stale
+  `configured` with no aimbot running is cosmetic, and the working check is starting the firmware.
 - All scripts and the panel use **LF** line endings (`.gitattributes` forces them; the board's `bash`
   does not accept CRLF/BOM).
 
