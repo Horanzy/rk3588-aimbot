@@ -1,0 +1,13 @@
+# 转换套件里只有脚本与说明进仓库。下面这些是每台机器自己的东西, 永不提交:
+#   onnx/     输入 .onnx (你自己训练的模型)
+#   axmodel/  产物
+#   dataset/  标定集 tar (你自己的帧)
+#   work/     每个模型的配置与日志 (可删, 重跑会再生成)
+onnx/
+axmodel/
+dataset/
+work/
+*.onnx
+*.axmodel
+*.tar
+*.tar.gz
