@@ -902,7 +902,9 @@ function connectWS() {
     if (m.type !== "tick") return;
     if (m.log && m.log.length) { appendLogs(m.log); S.wsSeq = m.log[m.log.length - 1][0]; }
     if (m.fps_new) {
-      if (m.fps_new.from === 0) S.fpsHist = m.fps_new.items;   // 重连后整表替换
+      // from=0 = 整表替换: 重连后的首帧, 或服务端会话纪元变化 (重启/认领) 后把本连接的
+      //   游标清零 —— 后者让打开的页面不必重连也能跟上新会话的读数
+      if (m.fps_new.from === 0) S.fpsHist = m.fps_new.items;
       else S.fpsHist.push(...m.fps_new.items);
       renderFpsPanel();
     }

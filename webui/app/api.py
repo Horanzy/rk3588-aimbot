@@ -451,6 +451,7 @@ async def ws_endpoint(ws: WebSocket, token: str = Query(""), since: int = 0):
     await ws.accept()
     inst_seq = since
     fps_i = 0                            # 每连接独立的 FPS 读数游标 (from=0 → 前端整表替换)
+    fps_ep = S.inst.snapshot()["fps_epoch"]   # 本连接见到的会话纪元 (重启/认领会换掉历史)
     task_seqs = {}
     last_tel = 0.0
     last_scan = None
@@ -473,6 +474,15 @@ async def ws_endpoint(ws: WebSocket, token: str = Query(""), since: int = 0):
             if scan != last_scan:
                 last_scan = scan
                 msg["scan"] = scan
+            # FPS 读数增量: 游标是**本连接**的状态, 而历史会被重启/认领清空 (下标回到 0) ——
+            #   不清零则本连接的游标停在旧会话的条数上, 页面从此收不到新读数 (旧会话的条数
+            #   比新会话长时永远收不到)。清零后 from=0, 前端按既有约定整表替换 (与重连同一条
+            #   路径); 同时先发一条空的 from=0 让页面立刻清表, 不然旧会话的读数要挂到新会话
+            #   的第一条 [AI FPS] 行 (60s) 才被换掉。
+            if inst["fps_epoch"] != fps_ep:
+                fps_ep = inst["fps_epoch"]
+                fps_i = 0
+                msg["fps_new"] = {"from": 0, "items": []}
             fh = S.inst.fps_hist_since(fps_i)
             if fh:
                 msg["fps_new"] = {"from": fps_i, "items": fh}

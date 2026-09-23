@@ -205,6 +205,10 @@ class InstanceManager:
         self.hot_port = None
         self.fps = None
         self.fps_hist = []                  # 本次运行 [(ts, fps)]; 重新启动即清空 (会话历史)
+        # 会话纪元: 每次清空读数历史 +1。前端与 WS 的增量游标都是单调的, 而清空让下标回到
+        #   0 —— 纪元是"历史被换掉"这件事本身的可观测形式, WS 据此把本连接的游标归零 (见
+        #   api.py 的 fps_ep), 否则重启后打开的页面拿不到新会话的读数。
+        self.fps_epoch = 0
         self.cap_counts = None              # 本次运行截图累计 {"fire","det","auto"}; 来自 [SAVE]
         self.model_info = None              # 本次运行模型信息 {"arch","size","classes"}; 来自 "模型:" 行
         self.calib_live = None              # 运行中标定回执 {"s","l"}
@@ -265,7 +269,7 @@ class InstanceManager:
                 "fps": self.fps, "calib_live": self.calib_live,
                 "capture": dict(self.cap_counts) if self.cap_counts else None,
                 "model_info": dict(self.model_info) if self.model_info else None,
-                "fps_hist_len": len(self.fps_hist),
+                "fps_epoch": self.fps_epoch,
                 "log_seq": self._seq,
             }
 
@@ -305,6 +309,7 @@ class InstanceManager:
             self.started_at = None
             self.fps = None
             self.fps_hist = []              # 会话历史: 新的一次运行从空开始
+            self.fps_epoch += 1             # 历史被换掉: 打开的页面的推进游标据此归零
             self.cap_counts = {"fire": 0, "det": 0, "auto": 0}
             self.model_info = None
             self.calib_live = None
@@ -534,6 +539,7 @@ class InstanceManager:
             self.error = None
             self.fps = None
             self.fps_hist = []              # 认领实例无日志: 上一会话的历史不再展示
+            self.fps_epoch += 1             # 同上: 旧会话的读数从此不再存在
             self.cap_counts = None
             self.model_info = None
             self.hot_capable = bool(info.get("hot_capable"))
