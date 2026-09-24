@@ -290,8 +290,10 @@ makes the shipped ratio default 75, not 100):
 
 ```
 -m model  -c class (-1 = do not filter by class)  -n model class count (0 = derive from the attribute count)
--t confidence
--y height offset  -d capture device (/dev/videoN; default = resolve the receiver by driver name)
+-t confidence (clamped 0–1)     -y height offset % (clamped 0–100)
+   both bands are the same constants the hot-param path clamps with (`core/state.h` is their single
+   definition point, so a value means the same thing whichever door it came in by)
+-d capture device (/dev/videoN; default = resolve the receiver by driver name)
 -x speed cap px/s (clamped 100–20000; default 2667 = the 1440p deployment landing)
 -l initial L (that mode's calibration writes it back; 0–120; the value is the calibrated physical loop
    delay — the only quantity the calibration writes and the running state uses, see "Calibration")
@@ -321,7 +323,9 @@ makes the shipped ratio default 75, not 100):
    first *-event-mouse; an explicit substring matching several nodes errors out and lists them — a
    plugged-in gamepad's auxiliary mouse interface matches the default pattern too, so the real mouse
    gets named here)
--k trigger key (fire/ads/both)  -v preview (y/n)
+-k trigger key (fire/ads/both)  -v preview (y/n; ESC in the preview window ends the whole run, not just
+   the window — a capture thread that stops while the process lives would leave the mouse grab and the
+   UDC session held with nothing left feeding them)
 ```
 
 **There is no frame-rate flag.** The capture rate is the signal's own property — the receiver's locked
