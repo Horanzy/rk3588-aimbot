@@ -23,6 +23,11 @@
            2 = 无法对齐(模型输入大于源图, 或环境缺 PIL) —— stdout 给的是源标定集原样,
                调用方应当把这一次计入"未对齐"并告警, 但不该因此中断整个转换
            1 = 硬错误(源标定集读不了等)
+
+缓存: 裁好的产物落在 work/ 下, 名字里带**源标定集名**(calib_px<尺寸>_<源名>), 同一个源没变
+      就复用。缓存键必须带源名 —— 只按尺寸命名时, 换了标定集(通用池 → 本游戏专用集, 这是
+      精度最关键的第二遍)而新源的时间戳更旧, 那次就会被当成"源标定集未变"而复用**上一个
+      游戏**的帧, 模型于是拿着别人的分布标定, 而转换日志上写的是新的那个源。
 """
 
 import io
@@ -116,10 +121,12 @@ def main():
                  size_want="%dx%d" % (want_w, want_h), size_have="%dx%d" % (have_w, have_h))
 
     os.makedirs(work, exist_ok=True)
-    out = os.path.join(work, "calib_px%dx%d.tar" % (want_w, want_h))
-    # 源标定集没变就复用上一轮的产物, 免得每加一个同尺寸的模型就重裁一遍。
+    out = os.path.join(work, "calib_px%dx%d_%s" % (want_w, want_h, os.path.basename(src)))
+    # 源标定集没变就复用上一轮的产物, 免得每加一个同尺寸的模型就重裁一遍。缓存键带源名, 所以
+    #   "没变"是**同一个源文件**没变 —— 不是"没有比它更新的源"(那条判据会把别的标定集当同一个)。
     if os.path.isfile(out) and os.path.getmtime(out) >= os.path.getmtime(src):
-        print("复用已裁好的 %s (源标定集未变)" % os.path.basename(out), file=sys.stderr)
+        print("复用已裁好的 %s (源 %s 未变)"
+              % (os.path.basename(out), os.path.basename(src)), file=sys.stderr)
         print(out)
         return
 

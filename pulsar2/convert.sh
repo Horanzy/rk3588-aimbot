@@ -18,6 +18,8 @@
 #
 #  目录: onnx/ 输入 · axmodel/ 产物 · dataset/ 标定 tar · work/ 配置与日志(可删)
 #  可覆盖: IMG= 镜像 · CALIB= 标定集 · CALIB_SIZE= 张数 · NPU_MODE= 核数
+#          KEEP_QUANT=1 留下 Pulsar2 的 debug 转储(验收要用, 见 check_quant.py)
+#          NO_LAST_U16=1 关掉"输出算子提 U16"(做 A/B)
 # ==============================================================================
 set -u
 ROOT="$(cd "$(dirname "$(realpath "$0")")" && pwd)"
@@ -25,7 +27,8 @@ MODEL=""; CALIB=""; OUT_NAME=""; OUT_DIR="axmodel"; FORCE=""
 CALIB_SIZE="${CALIB_SIZE:-100}"
 NPU_MODE="${NPU_MODE:-NPU3}"
 
-usage() { sed -n '3,24p' "$0"; exit "${1:-0}"; }
+# 用法横幅 = 开头连续的注释行(到第一行代码为止), 不写死行号 —— 改横幅不必再改这里。
+usage() { awk 'NR>2 && /^#/ {print; next} NR>2 {exit}' "$0"; exit "${1:-0}"; }
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -102,6 +105,7 @@ echo
 docker run --rm --net host -v "$ROOT":/data --entrypoint /bin/bash \
     -e MODEL="$MODEL_C" -e CALIB="$CALIB_C" -e CALIB_SIZE="$CALIB_SIZE" \
     -e NPU_MODE="$NPU_MODE" -e OUT_NAME="$OUT_NAME" -e OUT_DIR="$OUT_DIR" \
+    -e KEEP_QUANT="${KEEP_QUANT:-}" -e NO_LAST_U16="${NO_LAST_U16:-}" \
     "$IMG" -c '
 cd /data || exit 1
 PY=python3; command -v python3 >/dev/null || PY=python
@@ -145,6 +149,8 @@ if pulsar2 build --target_hardware AX650 --input "$BUILD_IN" --output_dir "/data
     #   量量化误差的唯一来源 —— 要留就 KEEP_QUANT=1。
     if [ "${KEEP_QUANT:-}" != "1" ]; then
         rm -rf "/data/$OUT_DIR/compiler" "/data/$OUT_DIR/frontend" "/data/$OUT_DIR/quant"
+    else
+        echo "   转储留在 $OUT_DIR/quant/debug/ 下 — 按通道角色量: python3 check_quant.py $OUT_DIR"
     fi
     rm -f "/data/work/$OUT_NAME.patched.onnx"
     exit 0
