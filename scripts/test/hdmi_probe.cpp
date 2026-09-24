@@ -12,6 +12,10 @@
 //      (自检那行会读到几百字节变化; 生产路径禁止关, 理由见 io/hdmi_in.h)
 //    * --dump <目录>: PNG 落盘位置 (缺省 /tmp)
 //
+//  返回值: 0 = 本次运行的验收项全过, 1 = 至少一项打了 ❌ (载荷稳定性自检、源几何对账、
+//   三条逐字节对照、落图复核、取帧/重建/RGA 的失败)。账只收判决项 —— 帧率与耗时那几行是
+//   测量, 不是判据; 而 poll 被信号打断 (Interrupted) 是退出路径, 不算失败。
+//
 //  失锁/断流: 探针按与生产路径同一条判据取帧 (io/hdmi_in.h 的 HdmiFail), 且**与生产路径
 //   一样重建而不是退出** —— 判为流断了就 rearm() 并接着数帧 (只是丢帧这样的失败仍然报出
 //   来)。这样一次探针长跑本身就是"失锁→重锁→画面回来"的验收: 给接收器写别的 EDID 即可
@@ -168,6 +172,10 @@ int main(int argc, char** argv) {
     }
     if (frames < 1) frames = 600;
     std::signal(SIGINT, on_sigint);
+    // 本次运行的验收账: 每一个 ❌ 记一笔, 末尾由它决定返回值 —— 探针是验收工具, 打印出来的
+    //   结论必须能被脚本判读, 只靠人眼看输出就等于没有判据。测量类输出 (帧率/延迟/耗时)
+    //   不是判据, 故不记账。
+    int nfail = 0;
 
     std::printf("== HDMI IN 探针: %d 帧, 交付=%s, 慢消费者=%dms, 设备=%s%s ==\n", frames,
                 fifo ? "队列顺序(对照)" : "最新帧", slow_ms, dev.empty() ? "(按驱动名解析)" : dev.c_str(),
@@ -189,6 +197,7 @@ int main(int argc, char** argv) {
     std::printf("[RGA] 源 %s %dx%d wstride %dpx -> 缓冲要求 %zuB, 驱动 sizeimage %zuB %s\n",
                 rga_format_name(src_fmt), src_geom.width, src_geom.height, src_geom.stride_px, src_need,
                 f.plane_bytes, src_need == f.plane_bytes ? "(一致)" : "(❌ 不一致)");
+    if (src_need != f.plane_bytes) ++nfail;
     const RgaRect crop = RgaPp::center_crop(f.width, f.height, CAP_SIZE);
     if (crop.side == 0) {
         std::fprintf(stderr, "❌ 源 %dx%d 装不下边长 %d 的 1:1 中心裁剪\n", f.width, f.height, (int)CAP_SIZE);
@@ -216,11 +225,15 @@ int main(int argc, char** argv) {
         HdmiFail fail = HdmiFail::Ok;
         if (!cap.wait_frame(&fr, &err, &fail)) {
             std::fprintf(stderr, "❌ 取帧失败: %s\n", err.c_str());
+            // Interrupted 是 poll 被信号打断的退出路径, 与流无关 (见 io/hdmi_in.h 的 HdmiFail),
+            //   不计进验收账 —— 否则 Ctrl+C 结束的一次探针会被判成失败。
+            if (fail != HdmiFail::Interrupted) ++nfail;
             // 与生产路径同一条恢复动作: 流断了就重建, 不是丢掉整条链 (判定见 io/hdmi_in.h)
             if (hdmi_fail_needs_rearm(fail) && !g_stop) {
                 std::fprintf(stderr, "   → 重建 (失锁/断流) …\n");
                 if (!cap.rearm(&err)) {
                     std::fprintf(stderr, "   ❌ 重建失败: %s\n", err.c_str());
+                    ++nfail;
                     break;
                 }
                 continue;
@@ -247,6 +260,7 @@ int main(int argc, char** argv) {
         int64_t c = now_ns();
         if (!win_rgb || !win_bgr) {
             std::fprintf(stderr, "❌ RGA 失败: %s\n", err.c_str());
+            ++nfail;
             break;
         }
         const RgaSrc mid{win_rgb->fd, win_rgb->side, win_rgb->side, win_rgb->stride_px,
@@ -255,6 +269,7 @@ int main(int argc, char** argv) {
         int64_t d = now_ns();
         if (!small) {
             std::fprintf(stderr, "❌ RGA (二级裁剪) 失败: %s\n", err.c_str());
+            ++nfail;
             break;
         }
         if (n >= 3) {  // 前 3 帧预热 (首次调用含 RGA 上下文/页表建立)
@@ -290,6 +305,9 @@ int main(int argc, char** argv) {
                 if (snap[i] != p[i]) ++d;
             std::printf("[自检] 交付后 6ms 内该帧首 4KB 变化 %ld 字节%s (等 fence 之后应为 0)\n", d,
                         d ? " ❌" : " ✓");
+            // --no-fence 正是这条结论的复现路径 (交付时载荷还在写, 非 0 是预期), 故只在
+            //   等 fence 的那条路径上把非 0 记成失败。
+            if (d && !no_fence) ++nfail;
         }
         const RgaSrc fsrc{fr.fd, fr.width, fr.height, fr.stride_px, fr.fourcc};
         const RgaDst* win_rgb = pp.crop_center(fsrc, CAP_SIZE, V4L2_PIX_FMT_RGB24, &err);
@@ -302,6 +320,7 @@ int main(int argc, char** argv) {
         }
         if (!win_rgb || !win_bgr || !small) {
             std::fprintf(stderr, "❌ 阶段 2 RGA 失败: %s\n", err.c_str());
+            ++nfail;
         } else {
             const uint8_t* base = (const uint8_t*)fr.map;
             std::printf("[对照] 源 '%s' %dx%d 行距 %dB, 取中心矩形 (%d,%d) %dx%d\n",
@@ -320,8 +339,10 @@ int main(int argc, char** argv) {
                                      &diff_at_bgr);
                 std::printf("[对照] 640 RGB888 (源 BGR3 → 换通道) 差异字节 %ld / %zu%s\n", diff_rgb,
                             win_rgb->bytes, diff_rgb ? " ❌" : " ✓");
+                if (diff_rgb) ++nfail;
                 std::printf("[对照] 640 BGR888 (源 BGR3 → 纯拷贝) 差异字节 %ld / %zu%s\n", diff_bgr,
                             win_bgr->bytes, diff_bgr ? " ❌" : " ✓");
+                if (diff_bgr) ++nfail;
                 // 二级裁剪: 源是 640 RGB 窗口 (已经是 RGB), 故参照也是纯拷贝
                 const RgaRect c2 = RgaPp::center_crop(win_rgb->side, win_rgb->side, small->side);
                 std::vector<uint8_t> ref2;
@@ -333,6 +354,7 @@ int main(int argc, char** argv) {
                             "%ld / %zu%s\n",
                             c2.x, c2.y, c2.side, c2.side, diff_320, small->bytes,
                             diff_320 ? " ❌" : " ✓");
+                if (diff_320) ++nfail;
                 // 通道落点: 挑矩形内 |R−B| 最大的像素做样本 —— 源 BGR3 的 R (源字节 2) 应落在
                 //   目的 RGB888 的第 0 字节。挑彩色像素是因为灰像素上"换没换通道"看不出来。
                 int bx = crop.x, by = crop.y;
@@ -398,6 +420,7 @@ int main(int argc, char** argv) {
                             if (a.at<cv::Vec3b>(y, x) != b.at<cv::Vec3b>(crop.y + y, crop.x + x)) ++d;
                     std::printf("[落图] 裁剪 PNG vs 原始帧 PNG 同区域逐像素差异 %ld / %d%s\n", d,
                                 a.rows * a.cols, d ? " ❌" : " ✓");
+                    if (d) ++nfail;
                 }
             }
         }
@@ -443,5 +466,5 @@ int main(int argc, char** argv) {
         std::printf("\n");
     }
     if (g_stop) std::printf("  (收到 SIGINT, 已停流并释放)\n");
-    return 0;
+    return nfail ? 1 : 0;   // 返回值 = 本次运行的验收结论, 见文件头的"返回值"一行
 }

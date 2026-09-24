@@ -223,7 +223,8 @@ static void xfer_sweep(const NpuSession* model, int iters) {
         B.push_back((double)b); th.push_back(sh.avg); td.push_back(sd.avg);
     }
 
-    // 两遍最小二乘: 全部点 (≥64KB) 与带宽支配段 (≥256KB); 残差逐点给出
+    // 两遍最小二乘: 全部尺寸点 (16KB–8MB 的枚举序列, 外加该模型自身的输入/输出尺寸) 与
+    //   带宽支配段 (≥256KB); 残差逐点给出
     auto fit = [&](const std::vector<double>& T, const char* tag, bool bandwidth_only) {
         std::vector<double> bb, tt;
         for (size_t i = 0; i < B.size(); ++i)
@@ -244,11 +245,11 @@ static void xfer_sweep(const NpuSession* model, int iters) {
                tag, icept, slope * 1048576.0, 1.0 / slope, worst, worst_at);
     };
     printf(" H2D:\n   ");
-    fit(th, "全部点 (≥64KB)", false);
+    fit(th, "全部点 (16KB–8MB)", false);
     printf("   ");
     fit(th, "带宽段 (≥256KB)", true);
     printf(" D2H:\n   ");
-    fit(td, "全部点 (≥64KB)", false);
+    fit(td, "全部点 (16KB–8MB)", false);
     printf("   ");
     fit(td, "带宽段 (≥256KB)", true);
     printf(" 注: 每次调用都有百微秒级固定项, 小尺寸项离线性最远 —— 预算用'带宽段'的斜率\n"

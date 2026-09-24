@@ -148,8 +148,12 @@ JPEG_Q="${JPEG_Q:-95}"                  # JPEG 质量
 
 # ==============================================================================
 # 平台前提 (librga / raw_gadget + UDC / axcl): 幂等, 已备好时只回读版本; 面板启动走的是
-#   同一条脚本, 所以手动跑与面板跑落在同一套前提上。
-sudo bash "$ROOT/scripts/setup_platform.sh"
+#   同一条脚本, 所以手动跑与面板跑落在同一套前提上。前提不齐时固件起来也是立刻失败, 故这里
+#   当场退出 —— 让失败停在它自己的原因上, 而不是推给固件的一条次生报错。
+sudo bash "$ROOT/scripts/setup_platform.sh" || {
+  echo "❌ 平台前提未就绪 (原因见上行) — 不启动 aimbot"
+  exit 1
+}
 
 SCRIPT_PATH="$(realpath "$0")"
 
@@ -157,6 +161,12 @@ SCRIPT_PATH="$(realpath "$0")"
 #   的 VAR, 消费点再兜一次底 (两处缺一不可: 缺行时中间变量为空, 靠消费点的默认值起身)。
 MODE_ARGS=()
 case "${OUTPUT_MODE:-hid}" in
+  hid)
+    MODE_ARGS=(-D "${MOUSE_KEYWORD:-}")
+    L_V="${HID_L_EST:-60.0}"
+    SPD_X_V="${HID_SPDX:-75}"; SPD_Y_V="${HID_SPDY:-75}"
+    ADS_X_V="${HID_ADS_SPDX:-75}"; ADS_Y_V="${HID_ADS_SPDY:-75}"
+    ;;
   pad)
     MODE_ARGS=(-M pad -P "${PAD_KEYWORD:-}" -T "${PAD_TRIG_THR:-6}")
     [ "${PAD_DUMP:-n}" = "y" ] && MODE_ARGS+=(--pad-dump)
@@ -172,10 +182,10 @@ case "${OUTPUT_MODE:-hid}" in
     ADS_X_V="${P5G_ADS_SPDX:-75}"; ADS_Y_V="${P5G_ADS_SPDY:-75}"
     ;;
   *)
-    MODE_ARGS=(-D "${MOUSE_KEYWORD:-}")
-    L_V="${HID_L_EST:-60.0}"
-    SPD_X_V="${HID_SPDX:-75}"; SPD_Y_V="${HID_SPDY:-75}"
-    ADS_X_V="${HID_ADS_SPDX:-75}"; ADS_Y_V="${HID_ADS_SPDY:-75}"
+    # 未识别的取值不能落到某个模式上: 落到 hid 会静默走鼠标链并取 HID 那一格值, 与操作者
+    #   写下的意图无关 (拼错的 PAD/ps5 都落在这一支), 故报错退出, 不兜底。
+    echo "❌ OUTPUT_MODE=\"${OUTPUT_MODE:-}\" 不是 hid / pad / p5g 之一 — 不启动"
+    exit 1
     ;;
 esac
 
@@ -185,6 +195,12 @@ if [ "${CAPTURE:-n}" = "y" ]; then
   [ "${CAP_FIRE:-y}" = "y" ] && CAP_SRC="${CAP_SRC:+$CAP_SRC,}fire"
   [ "${CAP_DET:-y}"  = "y" ] && CAP_SRC="${CAP_SRC:+$CAP_SRC,}det"
   [ "${CAP_AUTO:-y}" = "y" ] && CAP_SRC="${CAP_SRC:+$CAP_SRC,}auto"
+  # 一个源都没开时 -e "" 是权威的"全关": 固件照建 fire/det/auto 目录却什么都不采,
+  #   那是自相矛盾的配置而不是一种可用状态, 故当场报错而不是让采集静默空转。
+  if [ -z "$CAP_SRC" ]; then
+    echo "❌ CAPTURE=y 但 CAP_FIRE/CAP_DET/CAP_AUTO 全为 n — 没有可采集的源, 不启动"
+    exit 1
+  fi
   CAPTURE_ARGS=(-o "${OUT_DIR:-$ROOT/dataset}" -F "${FIRE_MS:-800}" -A "${AUTO_S:-10}" \
                 -C "${COOLDOWN_MS:-800}" -q "${JPEG_Q:-95}" -e "$CAP_SRC")
 fi

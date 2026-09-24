@@ -10,10 +10,11 @@
 #    ③ 控制传输: GET_REPORT(Feature) 三条 — 0x03 (48B 定义) / 0xF1 (64B 签名) /
 #       0xF2 (16B 签名状态)
 #    ④ 签名流水线: 中断 OUT 写入 64B 输入报告 → 中断 IN 读回 (hash 由加密狗填写),
-#       往返时延与回包对请求的 1:1 关系
+#       8 次提交的往返时延 (均值/最快 → 连续输入的报告率上限) 与回包对请求的 1:1 关系
 #    ⑤ 附带: evdev 节点 (pad_input 需要排除它) / raw_gadget + UDC 就绪度
 #
-#  纯 stdlib, 只读 + 一条 OUT 写入 (不进认证、不改设备状态)。run: sudo python3 ...
+#  纯 stdlib, 只读 + 8 条 OUT 写入 (签名往返计时的 8 次提交; 不进认证、不改设备状态)。
+#  run: sudo python3 ...
 # ==============================================================================
 import fcntl
 import os
@@ -66,6 +67,13 @@ def xread(path, binary=False):
     except OSError:
         return None
 
+def lsdir(path):
+    """目录项列表; 目录不存在时按空表返回 (与存在但为空同一条判定)"""
+    try:
+        return os.listdir(path)
+    except OSError:
+        return []
+
 def main():
     print("== P5 General 加密狗探针 (VID %04X PID %04X) ==" % (VID, PID))
     checks = 0
@@ -111,7 +119,7 @@ def main():
     checks += 1
 
     # evdev 附属节点 (pad_input 排除项的存在性确认)
-    evs = [e for e in os.listdir("/dev/input") if e.startswith("event")]
+    evs = [e for e in lsdir("/dev/input") if e.startswith("event")]
     info("/dev/input 下 event* 共 %d 个 (加密狗的摇杆节点已被 pad_input 按 VID/PID 排除)" % len(evs))
 
     def get_feature(rid, n, label):
@@ -185,7 +193,9 @@ def main():
     os.close(fd)
 
     # ⑥ 设备侧就绪度
-    if os.path.exists("/dev/raw-gadget") and os.listdir("/sys/class/udc"):
+    #   目录/节点不存在时按空处理: 模块没载的机器上也要走到自己的判定行, 不能在这里抛
+    #   OSError 把探针断在最后一项上。
+    if os.path.exists("/dev/raw-gadget") and lsdir("/sys/class/udc"):
         ok("设备侧: /dev/raw-gadget 与 UDC 就绪 (插 PS5 的口)")
         checks += 1
     else:

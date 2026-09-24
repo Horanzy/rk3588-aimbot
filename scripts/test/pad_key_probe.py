@@ -16,8 +16,8 @@
 #  按 Ctrl+C 结束。纯标准库; 无 root 时若节点可读也能跑。
 #
 #  输出解读: 例如按下分享键得到
-#      [EV_KEY] code=0x13c (BTN_TRIGGER_HAPPY1) value=1 down   ← 固件未映射
-#  那就是要在 pad_key_bit() 里加一条 `case BTN_TRIGGER_HAPPY1: return PADBTN_XXX;`
+#      [EV_KEY] code=0x2c1 (BTN_TRIGGER_HAPPY2) value=1 down   ← 固件未映射
+#  那就是要在 pad_key_bit() 里加一条 `case BTN_TRIGGER_HAPPY2: return PADBTN_XXX;`
 #  (以及 PadBtn 与 P5G 报告的对应位), 并补单测。
 # ==============================================================================
 import ctypes
@@ -83,7 +83,10 @@ def evdev_name(path):
         with open(path, "rb") as f:
             buf = ctypes.create_string_buffer(256)
             import fcntl
-            fcntl.ioctl(f.fileno(), 0x81014506, buf)      # EVIOCGNAME(256)
+            # EVIOCGNAME(len) 的 len 编在 ioctl 号的 size 段 (bit 16–29), 内核按它决定
+            #   往缓冲区写多少字节 —— 故这个 256 必须与上面缓冲区的 256 逐位对应, 差一
+            #   就是内核写到缓冲区之外 (257 = 0x81014506 会把 256 字符的名字写 257 字节)。
+            fcntl.ioctl(f.fileno(), 0x81004506, buf)      # EVIOCGNAME(256)
             return buf.value.decode("utf-8", "replace")
     except Exception:
         return ""

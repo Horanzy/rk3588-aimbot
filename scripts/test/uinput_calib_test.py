@@ -160,7 +160,10 @@ def main():
     print("虚拟设备: %s" % dev.node)
     print("回写 VAR: %s (模式 %s)" % (l_var, args.mode))
 
-    cmd = ["sudo", "-n", args.aimbot, "-m", args.model, "-c", "0", "-n", args.classes,
+    # 直接执行二进制, 不包一层 sudo: 本脚本自身就要 root (uinput/evdev 与 /dev/raw-gadget),
+    #   而经 sudo 起的子进程与 wrapper 隔着一次 fork, SIGINT 只到 wrapper —— aimbot 会活着
+    #   继续占着 UDC 与采集设备, 下一次运行就撞上实例门/EBUSY。
+    cmd = [args.aimbot, "-m", args.model, "-c", "0", "-n", args.classes,
            "-t", "0.5", "-y", "65", "-d", args.cam, "-x", "2000", "-l", "60",
            "-S", script, "-k", "fire", "-a", "y"] + dev_args
     log = open(logp, "w")
@@ -178,12 +181,15 @@ def main():
             dev.key(k, False)
         time.sleep(24)                                 # 整轮 (触发 5s + 播放 + 回执)
     finally:
-        p.send_signal(signal.SIGINT)
-        time.sleep(2)
+        # 收尸是这里的必须项: SIGINT 只是请求 (轮次在跑时固件未必立刻退), 而只要进程还在,
+        #   它占的 UDC/采集设备就不释放 —— 超时后强杀并再等一次, 不留下活着的小进程。
+        if p.poll() is None:
+            p.send_signal(signal.SIGINT)
         try:
+            p.wait(timeout=5)
+        except subprocess.TimeoutExpired:
             p.kill()
-        except OSError:
-            pass
+            p.wait()
         log.close()
         dev.destroy()
 

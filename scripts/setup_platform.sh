@@ -53,12 +53,20 @@ RGA_URL_DEFAULT="https://github.com/airockchip/librga.git"
 # 装机的架构只卖一份预编译库: aarch64 板子对 libs/Linux/gcc-aarch64
 RGA_PREBUILT="libs/Linux/gcc-aarch64/librga.so"
 
+usage() { echo "用法: $0 [--ref <分支/提交>] [--url <仓库地址>]"; }
+
 REF="$RGA_REF_DEFAULT"
+URL_GIVEN=0                        # --url 是否显式给出 (决定已有检出按哪个源拉取)
 while [ $# -gt 0 ]; do
     case "$1" in
-        --ref) REF="$2"; shift 2 ;;
-        --url) RGA_URL="$2"; shift 2 ;;
-        *) echo "用法: $0 [--ref <分支/提交>] [--url <仓库地址>]"; exit 2 ;;
+        # 取值缺失在 shift 2 处只会换回一个没有消息的非零退出, 故先数参数 (两项都吃一个值)
+        --ref)
+            [ $# -ge 2 ] || { usage; exit 2; }
+            REF="$2"; shift 2 ;;
+        --url)
+            [ $# -ge 2 ] || { usage; exit 2; }
+            RGA_URL="$2"; URL_GIVEN=1; shift 2 ;;
+        *) usage; exit 2 ;;
     esac
 done
 RGA_URL="${RGA_URL:-$RGA_URL_DEFAULT}"
@@ -105,8 +113,13 @@ ensure_librga() {
 
     # 取上游
     if [ -d "$WORK/.git" ]; then
-        echo "→ 更新上游检出 $WORK (ref $REF)"
-        git -C "$WORK" fetch --depth=1 -q origin "$REF"
+        # 已有检出: --url 显式给出时用它当本次拉取的源 —— 克隆失败提示里"换镜像后重试
+        #   --url"正是为这一次运行写的, 只看检出记录的 origin 会让那条提示对本次无效;
+        #   未给出则仍按检出的 origin 拉 (检出可能是从别的镜像建的)
+        local src=origin
+        [ "$URL_GIVEN" = "1" ] && src="$RGA_URL"
+        echo "→ 更新上游检出 $WORK (ref $REF, 源 $src)"
+        git -C "$WORK" fetch --depth=1 -q "$src" "$REF"
         git -C "$WORK" checkout -q FETCH_HEAD
     else
         echo "→ 克隆上游 $RGA_URL (ref $REF) 到 $WORK"
@@ -150,8 +163,12 @@ ensure_librga() {
         exit 1
     fi
     echo "✅ 回读校验: $PREFIX_INC/im2d_version.h = $inst_ver, $PREFIX_LIB/librga.so 内版本串 = $inst_lib_ver"
+}
 
-    # 运行期前提 (库能链接不等于能跑; 这里只报事实, 不代替谁去配)
+# 运行期前提 (库能链接不等于能跑; 这里只报事实, 不代替谁去配)。它与装没装无关, 故不放在
+#   ensure_librga 里 —— 那一段在"已装且版本正确"时会提前返回, 放进它内部就只在安装那一
+#   次被查到, 之后每次运行都会把一个 /dev/rga 缺失的板子报成"平台前提就绪"。
+ensure_rga_node() {
     if [ -c /dev/rga ]; then
         echo "✅ /dev/rga 存在 ($(ls -l /dev/rga | awk '{print $1, $3":"$4}')) — RGA 作业需要它的读写权 (root)"
     else
@@ -237,6 +254,7 @@ ensure_axcl() {
 }
 
 ensure_librga
+ensure_rga_node
 ensure_raw_gadget
 ensure_axcl
 

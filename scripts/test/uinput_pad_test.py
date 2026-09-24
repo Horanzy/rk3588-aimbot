@@ -210,22 +210,28 @@ def main():
         os.remove(args.log)
     logf = open(args.log, "w")
     proc = subprocess.Popen(
-        [args.aimbot, "-M", args.mode, "--pad-dump", "-P", "padtest",
+        [args.aimbot, "-M", args.mode, "--pad-dump", "-P", "padtest", "-T", "6",
          "-m", args.model, "-d", args.cam,
          "-t", "0.4", "-y", "65", "-x", "1500", "-k", "fire", "-v", "n"],
         stdout=logf, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
     d = None
     pad2 = None
+
+    def log_text():
+        """整份日志 (逐次打开即关, 既不漏 fd 也不怕半行/非 UTF-8 字节)"""
+        with open(args.log, errors="replace") as f:
+            return f.read()
+
     try:
         deadline = time.time() + 15
         while time.time() < deadline:
-            if "✅ 手柄: " in open(args.log, errors="replace").read():
+            if "✅ 手柄: " in log_text():
                 break
             if proc.poll() is not None:
-                sys.exit("✗ aimbot 提前退出:\n" + open(args.log).read())
+                sys.exit("✗ aimbot 提前退出:\n" + log_text())
             time.sleep(0.1)
         else:
-            sys.exit("✗ 15s 内 reader 未连接虚拟手柄:\n" + open(args.log).read())
+            sys.exit("✗ 15s 内 reader 未连接虚拟手柄:\n" + log_text())
         print("  reader 已连接虚拟手柄")
         d = Dump(args.log)
         pad.reset()
@@ -263,7 +269,7 @@ def main():
         ok(p is not None and p["rt"] == 64, "RT=256 → 64")
         pad.axis(ABS_Z, 0); pad.axis(ABS_RZ, 0); settle(d, 0.15)
 
-        print("== case4 fire 门控 (RT≠0=fire; -k fire 下 LT 不开门)")
+        print("== case4 fire 门控 (RT≥阈值=fire; -k fire 下 LT 不开门)")
         pad.axis(ABS_RZ, 1023); p = d.expect("fire", "1")
         ok(p is not None and p["gate"] == "1", "RT 按下 → fire=1, aim_gate=1")
         pad.axis(ABS_RZ, 0); p = settle(d, 0.1)
@@ -275,6 +281,15 @@ def main():
         ok(p is not None and p["fire"] == "0" and p["gate"] == "0",
            "LT 按下 → ads=1, -k fire 下不开门")
         pad.axis(ABS_Z, 0); settle(d, 0.15)
+
+        print("== case4b 扳机阈值 -T 6 (门 = round(6·255/100) = 15 逻辑值; RT≥门 才 fire)")
+        pad.axis(ABS_RZ, 56)                 # 56·255/1023 = 13.96 → 逻辑 14
+        p = d.expect("rt", 14)
+        ok(p is not None and p["fire"] == "0", "RT=56 → 逻辑 14 (< 门 15) → fire=0")
+        pad.axis(ABS_RZ, 60)                 # 60·255/1023 = 14.96 → 逻辑 15 = 门
+        p = d.expect("rt", 15)
+        ok(p is not None and p["fire"] == "1", "RT=60 → 逻辑 15 (= 门) → fire=1")
+        pad.axis(ABS_RZ, 0); settle(d, 0.15)
 
         print("== case5 dpad (HAT0 → 逻辑位)")
         pad.axis(ABS_HAT0X, -1); p = d.expect("btns", 0x2000)
