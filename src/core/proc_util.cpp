@@ -199,10 +199,16 @@ bool instance_lock_acquire() {
             char b[32] = {0};
             const ssize_t rn = pread(fd, b, sizeof(b) - 1, 0);
             const int rpid = rn > 0 ? atoi(b) : 0;
-            if (rpid > 0 && kill(rpid, 0) != 0 && errno == ESRCH) {
+            // "内容里那个 pid 已经走了"必须把**僵尸**算作已走: 实测 SIGKILL 之后进程停在僵尸
+            //   态 (state=Z, 没有 cmdline), kill(pid,0) 仍然成功 → 旧的 ESRCH 判据永不成立,
+            //   于是这把锁每次都被当成"主人还活着", 启动从此永久卡在"已有实例在运行: pid …"
+            //   上 (那一次报出来的 pid 正是这种僵尸, /proc/locks 里还挂着它名下的锁记录,
+            //   而按 fd 扫谁也扫不到 —— 僵尸早把 fd 关了)。锁文件的内容会过期、还会被内核
+            //   复用给无关任务, 所以判据只认"这个 pid 已经走了", 用与接管路径同一把尺。
+            if (rpid > 0 && pid_gone(rpid)) {
                 remnant_tried = true;
                 std::cerr << "[接管] 锁文件是残骸 (锁记在已不存在的 pid " << rpid
-                          << " 上, 无活进程打开它) → 重建锁文件\n";
+                          << " 上 [僵尸算已走], 无活进程打开它) → 重建锁文件\n";
                 ::unlink(INSTANCE_LOCK_PATH);
                 ::close(fd);
                 fd = open(INSTANCE_LOCK_PATH, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
