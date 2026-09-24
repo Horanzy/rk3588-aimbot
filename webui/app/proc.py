@@ -16,7 +16,9 @@ sudo 前缀 (需 NOPASSWD), aimbot 本身仍以服务身份运行 —— 它要�
 
 状态机: stopped → starting → running → exited (→ stopped 由下次启动覆盖)。
 异常退出 (非用户停止且退出码非 0) 置 abnormal, UI 横幅可查。
-WebUI 自身重启时扫描 /proc 认领已存活的 aimbot (adopted, 日志不可见但可停止)。
+WebUI 自身重启时扫描 /proc 认领已存活的 aimbot (adopted, 日志不可见但可停止); 状态停在
+stopped/exited 时也定期回看 (面板起来之后才跑起来的实例同样要被看见 —— 见 api.py 的 WS 心跳),
+于是"存活实例"不会被页面显示成"已停止"而诱导双开, 【启动】也不会在没清场的情况下撞实例锁。
 """
 import json
 import os
@@ -153,7 +155,12 @@ def wrapped_argv(argv: list) -> list:
 
 
 def find_aimbot_pids(bin_path: str) -> list:
-    """/proc 扫描 exe==bin_path 的进程 (精确路径匹配, 覆盖 SSH 手跑实例)。"""
+    """/proc 扫描 exe==bin_path 的进程 (精确路径匹配, 覆盖 SSH 手跑实例)。
+
+    两侧都先 realpath 再比: bin_path 由操作员填的部署根拼出来 (可能带符号链接段, 例如
+    /home 指到别处), 而 /proc/<pid>/exe 读出来的是内核侧的真实路径 —— 只归一化一侧等于
+    永不匹配, 于是认领与启动前的清场一起变成静默的空操作。"""
+    want = os.path.realpath(bin_path)
     pids = []
     try:
         entries = list(Path("/proc").iterdir())
@@ -163,7 +170,7 @@ def find_aimbot_pids(bin_path: str) -> list:
         if not d.name.isdigit():
             continue
         try:
-            if os.path.realpath(str(d / "exe")) == bin_path:
+            if os.path.realpath(str(d / "exe")) == want:
                 pids.append(int(d.name))
         except OSError:
             continue
@@ -208,7 +215,10 @@ def aimbot_lock_free():
 class InstanceManager:
     def __init__(self, history_path: Path):
         self._hist_path = history_path
+        # _lock 只护状态本身 (快照/日志/状态机字段都是微秒级地拿它); _start_lock 才串行整段
+        #   启动序列 (含清场的等待), 见 start()。
         self._lock = threading.RLock()
+        self._start_lock = threading.Lock()
         self._log = deque(maxlen=5000)      # [(seq, line)]
         self._seq = 0
         self._proc = None
@@ -301,13 +311,28 @@ class InstanceManager:
 
     def start(self, root: Path, profile: str, display_name: str,
               params: dict, script_path: Path):
-        with self._lock:
+        # 启动序列整段由 _start_lock 串行 (两次并发【启动】不交替), 而 _lock 只护状态本身:
+        #   清场要等旧进程彻底退出 (最长 5s), 把它圈进 _lock 等于让同一段时间里每个 HTTP 请求、
+        #   每条 WS 快照一起排队 —— 面板的响应性不该由别人进程的退出速度决定。
+        with self._start_lock:
+            with self._lock:
+                stale = self.state if self.state in RUNNING_STATES else None
+                self._user_stop = False     # 本次启动的窗口从这一拍开始: 窗口内到达的【停止】必须可见
             # 【启动】= 以新设置重启 = 保存 + 清场 + 拉起: 在跑的实例 (含 SSH 手跑被认领的)
-            # 先停掉 —— 否则"按【启动】接管"只是一个不成立的提示。清场后 state 落到
-            # starting, 旧进程的 pump 线程收尾时按进程对象判别, 不会覆盖新状态。
-            if self.state in RUNNING_STATES:
-                self._append_log("■ 已有实例在跑 (%s): 先停止, 再以新设置启动" % self.state)
-                self.kill_all(root)
+            # 先停掉 —— 否则"按【启动】接管"只是一个不成立的提示。
+            if stale:
+                self._append_log("■ 已有实例在跑 (%s): 先停止, 再以新设置启动" % stale)
+            # 清场不看面板自己认不认得这个实例: /proc 扫描没命中就立即返回, 命中了就必须先收掉。
+            #   认领有窗口 (面板起来之后才在别处跑起来的实例), 漏掉它等于让新进程撞上实例锁、
+            #   rc=1 退出, 页面只会报一句"异常退出"。
+            self.kill_all(root)
+            with self._lock:
+                if self._user_stop:         # 清场期间到达的【停止】: 停止胜出, 不把实例又拉起来
+                    self._proc = None
+                    self.pid = None
+                    return False, "启动期间收到【停止】: 本次启动已取消"
+                # 清场后 state 落到 starting, 旧进程的 pump 线程收尾时按进程对象判别, 不会覆盖
+                #   新状态 —— 句柄在这里注销, 它那份"还是不是我"的判据就此让位
                 self._proc = None
                 self.pid = None
             bin_path = root / "bin" / "aimbot"
@@ -320,28 +345,28 @@ class InstanceManager:
             if not Path(model_abs).is_file():
                 return False, "模型不存在: %s (转换后放进 engine/ 再重选)" % model
             argv = build_argv(root, params, script_path)
-            self._user_stop = False
-            self.state = "starting"
-            self.profile = profile
-            self.display_name = display_name
-            self.adopted = False
-            self.error = None
-            self.exit_code = None
-            self.exit_signal = None
-            self.abnormal = False
-            self.ended_at = None
-            self.started_at = None
-            self.fps = None
-            self.fps_hist = []              # 会话历史: 新的一次运行从空开始
-            self.fps_epoch += 1             # 历史被换掉: 打开的页面的推进游标据此归零
-            self.cap_counts = {"fire": 0, "det": 0, "auto": 0}
-            self.model_info = None
-            self.calib_live = None
-            self.steps = [{"name": n, "status": "pending", "detail": "", "ms": 0}
-                          for n in STEP_NAMES]
-            self._append_log("════ 启动 %s (%s) ════" % (display_name, profile))
-            self._append_log("$ " + cmd_string(wrapped_argv(argv)))
-        threading.Thread(target=self._run, args=(root, argv), daemon=True).start()
+            with self._lock:
+                self.state = "starting"
+                self.profile = profile
+                self.display_name = display_name
+                self.adopted = False
+                self.error = None
+                self.exit_code = None
+                self.exit_signal = None
+                self.abnormal = False
+                self.ended_at = None
+                self.started_at = None
+                self.fps = None
+                self.fps_hist = []          # 会话历史: 新的一次运行从空开始
+                self.fps_epoch += 1         # 历史被换掉: 打开的页面的推进游标据此归零
+                self.cap_counts = {"fire": 0, "det": 0, "auto": 0}
+                self.model_info = None
+                self.calib_live = None
+                self.steps = [{"name": n, "status": "pending", "detail": "", "ms": 0}
+                              for n in STEP_NAMES]
+                self._append_log("════ 启动 %s (%s) ════" % (display_name, profile))
+                self._append_log("$ " + cmd_string(wrapped_argv(argv)))
+            threading.Thread(target=self._run, args=(root, argv), daemon=True).start()
         return True, ""
 
     def _run_step(self, cmd: list, timeout: int):

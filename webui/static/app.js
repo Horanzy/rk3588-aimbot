@@ -61,7 +61,7 @@ const S = {
   fpsHist: [],                        // 本次运行 [AI FPS] 读数 [[ts, fps]] (会话级, 重启清空)
   capFolder: null, capFolderName: "", capDir: "",
   theme: localStorage.getItem("wb_theme") || "dark",
-  taskLogs: {}, taskOpen: {},
+  taskOpen: {},
   openInfo: new Set(),                // 已展开 ⓘ 的参数 key (跨重渲染保持)
 };
 
@@ -714,6 +714,12 @@ async function saveProfile(silent) {
   S.dirty = false;
   // 脚本是唯一事实源: 保存 = 服务端已写回脚本; 拉回最新扫描并回读刷新表单 (显示规范值)
   try { S.state.scan = await api("/api/scan", { method: "POST" }); } catch (e) { /* 下次对齐 */ }
+  // 提交了却没写回脚本的值 (非法字符/被清空的路径/未知键): 服务端点名上报, 这里必须说出来 ——
+  //   不然"部分写回"会被一句"已保存"盖住; 静默保存 (【启动】内部那次) 也照说, 它不是闲聊
+  const rej = r.rejected || [];
+  if (rej.length) {
+    toast("未写入脚本的项: " + rej.map(x => `${x.key} (${x.reason})`).join("; "), "err");
+  }
   if (!silent) {
     if (r.hot_applied && Object.keys(r.hot_applied).length) {
       toast("已保存并写回脚本; 热参数已下发: " + Object.entries(r.hot_applied).map(([k, v]) => k + "=" + v).join("  ") + " — 生效回执看日志", "ok");
@@ -845,7 +851,9 @@ function updateTaskEl(t, el) {
     el.dataset.loaded = "1";
     api(`/api/tasks/${t.id}/log?since=0`).then(r => {
       logEl.textContent = r.lines.map(l => l[1]).join("\n");
-      el.dataset.domSeq = String(r.seq);
+      // 补全与 WS 增量是同一条流的两半: 全量请求在飞的这段时间里 WS 可能已经推过更新的行,
+      //   游标只许前进 (取 max), 否则后面的行会按旧游标重放一遍
+      el.dataset.domSeq = String(Math.max(Number(el.dataset.domSeq || 0), r.seq));
       logEl.scrollTop = logEl.scrollHeight;
     }).catch(() => { });
   }
@@ -854,10 +862,15 @@ function appendTaskLog(tid, lines) {
   const el = $(`[data-task="${tid}"]`);
   if (!el) return;
   const logEl = el.querySelector(".task-log");
+  // WS 的 (重) 连接每条都从 seq 0 重发保留段, 而面板可能刚用 since=0 把同一段填进过 DOM ——
+  //   只追加比 DOM 游标新的行, 否则一次断线重连就把整段日志再贴一遍
+  const cur = Number(el.dataset.domSeq || 0);
+  const fresh = lines.filter(l => l[0] > cur);
+  if (!fresh.length) return;
   // 收起时也累积文本 (保持与 seq 一致), 展开时可见; 只有滚动按需
-  for (const [, text] of lines) logEl.textContent += (logEl.textContent ? "\n" : "") + text;
+  for (const [, text] of fresh) logEl.textContent += (logEl.textContent ? "\n" : "") + text;
   if (!logEl.classList.contains("hidden")) logEl.scrollTop = logEl.scrollHeight;
-  el.dataset.domSeq = String(lines[lines.length - 1][0]);
+  el.dataset.domSeq = String(fresh[fresh.length - 1][0]);
 }
 
 /* ================= 渲染: 设置页 ================= */

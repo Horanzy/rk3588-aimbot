@@ -6,6 +6,8 @@ X-WebUI-Token 头, WS 走 ?token=。
 推送: 单条 WS 轮询合流 —— 实例快照+任务摘要每 0.4s、日志按序号增量
 ([SAVE]/[AI FPS] 行不推进页面流, 见 proc.HIDDEN_IN_STREAM)、FPS 读数增量、遥测每 2s;
 客户端断线重连后用 /api/state 全量重建, 再以 log_seq 续传。
+循环: HTTP 与 WS 共用**同一条事件循环** (uvicorn 单 worker), 所以心跳里的阻塞段 (重扫要开
+接收器、实例快照要拿实例状态锁) 一律丢进线程池 —— 一处阻塞调用就是所有请求一起排队。
 """
 import asyncio
 import os
@@ -68,7 +70,7 @@ async def _auth_mw(request, call_next):
         response = await call_next(request)
     else:
         token = request.headers.get("x-webui-token") or request.query_params.get("token")
-        if token != S.cfg.get("token"):
+        if not _token_ok(token or ""):
             return PlainTextResponse("unauthorized", status_code=401)
         response = await call_next(request)
     if path == "/" or path.startswith("/static"):
@@ -148,8 +150,16 @@ def api_scan():
 # ---------- 认证 ----------
 
 def _token_ok(tok: str) -> bool:
+    """token 判据的唯一拼写 (HTTP 头/查询串、登录端点与 WS ?token= 共用一条)。"""
     return secrets.compare_digest(str(tok).encode("utf-8"),
                                   str(S.cfg.get("token", "")).encode("utf-8"))
+
+
+# 登录/设密失败的固定延迟 (README 的"固定 1s 延迟", 只有一个定义点): 两个端点因此是 async 的
+#   —— 延迟期间事件循环只挂起自己, 不占线程池, 未认证突发打不垮面板的响应性。同一条理由把
+#   PBKDF2 那一段 (config 的 200k 轮) 放进线程: 它留在循环上, 等于把线程池里省下的等待换成
+#   循环上的 CPU, 面板照样不响。
+AUTH_FAIL_DELAY_S = 1.0
 
 
 @app.get("/api/auth/mode")
@@ -164,29 +174,30 @@ class LoginIn(BaseModel):
 
 
 @app.post("/api/auth/setup")
-def api_auth_setup(inp: LoginIn):
+async def api_auth_setup(inp: LoginIn):
     """首次设置密码 (或忘记密码后凭 token 重设): 必须先验证 token。"""
     if not inp.token or not _token_ok(inp.token):
-        time.sleep(1.0)
+        await asyncio.sleep(AUTH_FAIL_DELAY_S)
         raise HTTPException(401, "token 不对")
     if not inp.password or len(inp.password) < 4:
         raise HTTPException(400, "密码至少 4 位")
-    S.cfg = config.update(password_hash=config.hash_password(inp.password))
+    digest = await asyncio.to_thread(config.hash_password, inp.password)
+    S.cfg = config.update(password_hash=digest)
     return {"ok": True, "token": S.cfg["token"]}
 
 
 @app.post("/api/auth/login")
-def api_auth_login(inp: LoginIn):
+async def api_auth_login(inp: LoginIn):
     """密码或 token 登录, 成功换回 token —— 之后所有请求仍走 X-WebUI-Token,
     鉴权管道不变。失败加固定小延迟 (单用户局域网工具, 不上重型防爆破)。"""
     ok = False
     if inp.token and _token_ok(inp.token):
         ok = True
-    elif (inp.password and S.cfg.get("password_hash")
-          and config.verify_password(inp.password, S.cfg["password_hash"])):
-        ok = True
+    elif inp.password and S.cfg.get("password_hash"):
+        ok = await asyncio.to_thread(config.verify_password, inp.password,
+                                     S.cfg["password_hash"])
     if not ok:
-        time.sleep(1.0)
+        await asyncio.sleep(AUTH_FAIL_DELAY_S)
         raise HTTPException(401, "密码或 token 不对")
     return {"ok": True, "token": S.cfg["token"]}
 
@@ -252,13 +263,17 @@ def api_profile_put(stem: str, inp: ProfileIn):
     的临界区里完成。在这里先合并再交出去是**一条被实测否掉的路** —— 那等于把读的那一半留在
     锁外, 两个同时在飞的保存各拿一份旧现值, 后写者的重命名把前写者的改动整段抹掉 (板端
     20 轮两个并发 PUT: 两项都落笔 0 轮)。下面的现值解析只服务于热参差量 (改了哪几项), 不参与
-    写回。"""
+    写回。
+
+    `rejected` = 提交了却没有写回脚本的项 (值非法 / 路径被清空 / 键不在白名单): 补丁语义下
+    这类键在脚本里保持现值是正确的, 但"没写"必须说出来 —— 页面据此提示, 不给一句已保存的
+    假话。"""
     p = _find_profile(stem)
     if p is None:
         raise HTTPException(404, "未知的游戏 profile: %s" % stem)
     script_path = S.root() / "scripts" / "game" / (stem + ".sh")
     old_params = discover.parse_script(script_path, S.root())
-    patch = discover.validate_params(inp.params or {}, S.root(), partial=True)
+    patch, rejected = discover.validate_params(inp.params or {}, S.root(), partial=True)
     try:
         discover.write_script_params(script_path, patch, S.root())
     except OSError as e:
@@ -293,7 +308,8 @@ def api_profile_put(stem: str, inp: ProfileIn):
         else:
             reason = "运行中的是其它 profile, 本 profile 的改动将在下次【启动】生效"
     S.rescan()
-    return {"ok": True, "hot_applied": applied, "hot_reason": reason}
+    return {"ok": True, "hot_applied": applied, "hot_reason": reason,
+            "rejected": rejected}
 
 
 class CopyIn(BaseModel):
@@ -452,7 +468,7 @@ def api_task_log(tid: str, since: int = 0):
 
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket, token: str = Query(""), since: int = 0):
-    if token != S.cfg.get("token"):
+    if not _token_ok(token):
         await ws.close(code=4401)
         return
     await ws.accept()
@@ -468,9 +484,20 @@ async def ws_endpoint(ws: WebSocket, token: str = Query(""), since: int = 0):
             await asyncio.sleep(0.4)
             tick += 1
             if tick % 12 == 0:
-                # ~5s 重扫: 脚本是唯一事实源, SSH 侧改动自动到达所有打开的页面
-                S.rescan()
-            inst = S.inst.snapshot()
+                # ~5s 重扫: 脚本是唯一事实源, SSH 侧改动自动到达所有打开的页面。扫描要读脚本/
+                #   模型清单、还要开一次接收器 (v4l2-ctl 子进程, 上限 5s), 所以整段放线程里 ——
+                #   事件循环上的阻塞调用会把同一时刻的每个 HTTP 请求与每条 WS 消息一起卡住
+                #   (面板是单进程单循环)。
+                await asyncio.to_thread(S.rescan)
+                if S.inst.state in ("stopped", "exited"):
+                    # 认领不是一次性的: 面板起来**之后**才在别处 (SSH) 跑起来的实例, 状态停在
+                    #   "已停止"时定期回看 /proc。漏掉它就轮到下一次【启动】撞上实例锁、新进程
+                    #   rc=1 退出, 页面只会报"异常退出" —— 而这正是"绝不把存活实例显示成已停止"
+                    #   要挡住的那件事 (adopt 没命中时不改任何状态, 所以这里可以反复调)。
+                    await asyncio.to_thread(S.inst.adopt, S.root(), S.cfg["hot_port"])
+            # 快照与启动序列共用实例状态锁: 放线程里拿, 免得面板的 HTTP/WS 响应性跟着别人
+            #   进程的退出速度走
+            inst = await asyncio.to_thread(S.inst.snapshot)
             lines = S.inst.log_since(inst_seq)
             if lines:
                 inst_seq = lines[-1][0]

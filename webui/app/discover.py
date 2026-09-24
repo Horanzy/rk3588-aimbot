@@ -22,6 +22,14 @@ from pathlib import Path
 
 VAR_RE = re.compile(r"^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*?)\s*$")
 SCRIPT_STEM_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+# 文本类值 (设备匹配子串 / 模型与输出目录路径) 里在**启动脚本**中有特殊含义的字符。值写回时落在
+#   行内原有的双引号里, 而双引号内 `$(…)`/反引号照旧执行、引号与反斜杠本身能让值越出引号 ——
+#   一次网页保存就成了往用户的启动脚本里落笔任意 shell 片段; 控制字符更直接: 换行能在脚本里
+#   长出新的一行; `#` 与空白一起构成行内注释的判据, 会把值的后半截吃掉。
+#   判据是**排除**而不是白名单: 中文目录名 (`dataset/<游戏名>/`) 与带空格的目录是合法部署形态,
+#   它们在双引号里原样成立, 只有上列字符才有语义。非 ASCII 字节不在此列 (shell 只对 ASCII 的
+#   元字符有解释)。
+_VALUE_UNSAFE_RE = re.compile(r"""[\x00-\x1f\x7f"'`$\\#;|&<>(){}[\]*?!~]""")
 # 输出模式: 三套输出互斥, 各自独占 UDC (顺序也是 UI 里分组的顺序)
 OUTPUT_MODES = ("hid", "pad", "p5g")
 # 模板约定: 每个手改量写成 ${VAR:-默认}, 缺行也能起。读脚本时必须解析到**有效值**,
@@ -218,15 +226,26 @@ def parse_script(path: Path, root: Path):
     return params
 
 
-def validate_params(user: dict, root: Path, partial: bool = False) -> dict:
-    """UI 提交的参数 → 白名单化 + 类型化 + 钳制后的参数集 (非法项回退默认)。
+def validate_params(user: dict, root: Path, partial: bool = False):
+    """UI 提交的参数 → 白名单化 + 类型化 + 钳制后的参数集 + 没落笔的项。
 
     partial=True 只回传提交里出现的键 (逐项校验后就地夹取), 用于【保存】的补丁语义:
     没提交的键保持脚本现值, 不套默认值 —— 否则一次只改 spd 的提交会把其余 VAR 全部
-    打回默认。"""
+    打回默认。
+
+    返回 (params, rejected)。rejected = [{key, value, reason}] 是**提交了却没有写回脚本**
+    的项: 补丁语义里"没进 params 的键保持脚本现值"对没提交的键是正确行为, 对提交了却被拒
+    的值就不是 —— 调用方把它原样放进响应, 页面才会说出"这一项没写", 而不是给一句成功的
+    假话。被判非法的值一律不写 (回退默认或保持现值), 绝不按字面落进脚本。"""
     out = {} if partial else {k: d["default"] for k, d in PARAM_DEFS.items()}
+    rejected = []
+
+    def _reject(key, value, reason):
+        rejected.append({"key": key, "value": str(value), "reason": reason})
+
     for k, v in (user or {}).items():
         if k not in PARAM_DEFS:
+            _reject(k, v, "未知参数 (不在参数白名单里)")
             continue
         d = PARAM_DEFS[k]
         try:
@@ -238,19 +257,23 @@ def validate_params(user: dict, root: Path, partial: bool = False) -> dict:
                 out[k] = bool(v)
             elif d["kind"] == "enum":
                 out[k] = v if v in d["choices"] else d["default"]
-            elif d["kind"] == "path":
-                s = str(v or "").strip()
-                if s and ".." not in Path(s).parts:
-                    out[k] = _relativize(Path(s), root)
-            elif d["kind"] == "dsdir":
-                s = str(v or "").strip()
-                if s and ".." not in Path(s).parts:
-                    out[k] = _relativize(Path(s), root)
             else:
-                out[k] = str(v).strip()
+                s = str(v or "").strip()
+                if _VALUE_UNSAFE_RE.search(s):
+                    _reject(k, s, "值含引号/命令替换/控制字符等在启动脚本里有特殊含义的字符")
+                elif d["kind"] in ("path", "dsdir"):
+                    if not s:
+                        _reject(k, s, "空值不写回: 脚本里那一行保持现值 "
+                                      "(不能把已有路径/输出目录抹成空串)")
+                    elif ".." in Path(s).parts:
+                        _reject(k, s, "路径不能含 .. (会越出部署根)")
+                    else:
+                        out[k] = _relativize(Path(s), root)
+                else:
+                    out[k] = s
         except (TypeError, ValueError):
-            pass
-    return out
+            _reject(k, v, "不是 %s 类型的值" % d["kind"])
+    return out, rejected
 
 
 # ---------- 脚本写回 (脚本 = 唯一事实源) ----------
@@ -310,7 +333,8 @@ _RMW_ATTEMPTS = 3
 def write_script_params(path: Path, params: dict, root: Path) -> None:
     """把 params 原子写回脚本头部的 VAR=value 块。
 
-    只改目标变量的值: 行内注释、引号风格、其余每一行逐字保留;
+    只改目标变量的值: 行内注释、引号风格、其余每一行逐字保留; 行尾统一成 LF (触碰行由值重建、
+    不带 CR, 保留 CRLF 会得到两种行尾混排的脚本);
     脚本里缺失的变量追加到最后一个已知变量行之后; 执行位不变。
 
     两条例外规则, 都是"不破坏脚本"优先:
@@ -352,7 +376,10 @@ def _write_once(path: Path, params: dict, root: Path) -> bool:
     st = path.stat()
     raw = path.read_bytes()
     has_bom = raw.startswith(b"\xef\xbb\xbf")
-    text = raw.decode("utf-8-sig", errors="replace")
+    # 行尾统一成 LF: 触碰行的字面量由值重建 (不带 CR), 照原样保留其余行的 CRLF 会得到两种
+    #   行尾混排的脚本。CRLF 在这里本就是异常 (仓库用 .gitattributes 强制 LF), 归一化是写回
+    #   的一部分而不是顺带效果。
+    text = raw.decode("utf-8-sig", errors="replace").replace("\r\n", "\n")
     trailing_nl = text.endswith("\n")
     body = text[:-1].split("\n") if trailing_nl else text.split("\n")
 
