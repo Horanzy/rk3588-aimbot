@@ -528,11 +528,26 @@ int main() {
         const auto slurp = [&]() { std::ifstream in(path);
             return std::string((std::istreambuf_iterator<char>(in)),
                                std::istreambuf_iterator<char>()); };
-        // 画面完全冻结: σ=0 → 无响应
+        // 零噪声但会响应的画面 (确定性数字源的形态; 实测 resp 恰为 1.000): σ 取估计器分辨率
+        //   地板 → **可测**。旧行为在这里判"画面完全静止", 把'源逐帧确定'误报成'无游戏或
+        //   画面未响应' —— 而那时激励段每帧走 12px。
         {
             const E2E e = run_e2e(CAL_MODE_HID, {40, 1.5, 0, 0.0, 0, 1}, 120, 3u, true);
-            CHECK(!e.ok && std::string(e.r.err).find("静止") != std::string::npos,
-                  "画面完全静止 → 失败并说明原因 (不允许硬算)");
+            CHECK(e.ok && e.r.sigma[0] >= CAL_SIGMA_FLOOR_PX,
+                  "零噪声但会响应 → 可测, 且 σ 取地板 (不再判'画面完全静止')");
+            printf("     零噪声用例: L 实测 %.1fms (真值 40, σx=%.4f)\n",
+                   (double)e.r.l_est, (double)e.r.sigma[0]);
+            CHECK(cal_writeback(CAL_VAR_HID, e.r, e.r.l_est, path), "成功路径写回");
+        }
+        // 真正冻结 (不响应 + 无噪声): 仍必须失败且不写回 —— 由激励段读数抓 (行程为 0),
+        //   理由说的是对的 (不是把画面判成静止, 而是没有任何一段测到运动)
+        {
+            const E2E e = run_e2e(CAL_MODE_HID, {40, 1.5, 0, 0.0, 0, 0}, 120, 4u, true);
+            CHECK(!e.ok, "画面完全冻结 → 仍然失败 (不允许硬算)");
+            CHECK(std::string(e.r.err).find("运动") != std::string::npos
+                  || std::string(e.r.err).find("超时") != std::string::npos
+                  || std::string(e.r.err).find("截断") != std::string::npos,
+                  "失败原因指向'没有任何激励段测到运动'");
             CHECK(!cal_writeback(CAL_VAR_HID, e.r, e.r.l_est, path), "失败路径不写回");
         }
         // 只有噪声、没有任何响应 (画面在抖但不跟命令)
