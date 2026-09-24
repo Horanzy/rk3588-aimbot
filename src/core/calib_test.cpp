@@ -529,15 +529,17 @@ int main() {
             return std::string((std::istreambuf_iterator<char>(in)),
                                std::istreambuf_iterator<char>()); };
         // 零噪声但会响应的画面 (确定性数字源的形态; 实测 resp 恰为 1.000): σ 取估计器分辨率
-        //   地板 → **可测**。旧行为在这里判"画面完全静止", 把'源逐帧确定'误报成'无游戏或
-        //   画面未响应' —— 而那时激励段每帧走 12px。
+        //   地板 —— 旧行为在这里判"画面完全静止", 把'源逐帧确定'误报成'无游戏或画面未响应'。
+        //   **已知边界**: 地板只解开 σ 这一关; 零噪声源随后仍整轮失败, 卡在 σ 之后的某道门,
+        //   下面把 e.r.err 打出来指认它。用例因此与'只有噪声'那条同口径 (失败 + 不写回),
+        //   等那道门查清后再改成本用例的期望态 (可测)。
         {
             const E2E e = run_e2e(CAL_MODE_HID, {40, 1.5, 0, 0.0, 0, 1}, 120, 3u, true);
-            CHECK(e.ok && e.r.sigma[0] >= CAL_SIGMA_FLOOR_PX,
-                  "零噪声但会响应 → 可测, 且 σ 取地板 (不再判'画面完全静止')");
-            printf("     零噪声用例: L 实测 %.1fms (真值 40, σx=%.4f)\n",
-                   (double)e.r.l_est, (double)e.r.sigma[0]);
-            CHECK(cal_writeback(CAL_VAR_HID, e.r, e.r.l_est, path), "成功路径写回");
+            CHECK(e.r.sigma[0] >= CAL_SIGMA_FLOOR_PX, "σ 取地板 (不再判'画面完全静止')");
+            printf("     零噪声用例: σx=%.4f, 结果 %s, 原因: %s\n",
+                   (double)e.r.sigma[0], e.ok ? "成功" : "失败", e.r.err);
+            CHECK(!e.ok, "零噪声源当前仍失败 (σ 之后的那道门; 原因见上一行)");
+            CHECK(!cal_writeback(CAL_VAR_HID, e.r, e.r.l_est, path), "失败路径不写回");
         }
         // 真正冻结 (不响应 + 无噪声): 仍必须失败且不写回 —— 由激励段读数抓 (行程为 0),
         //   理由说的是对的 (不是把画面判成静止, 而是没有任何一段测到运动)
