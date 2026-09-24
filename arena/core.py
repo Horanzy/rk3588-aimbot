@@ -42,7 +42,7 @@ class ArenaConfig:
     fps: int = 120             # 帧率
     noise_std: float = 0.0     # 检测噪声 std (px, 每轴)
     duration: float = 3000.0   # 场景时长 ms
-    count_limit: int = 120     # 被控对象侧 counts 限幅 (忠实复现硬件)
+    count_limit: int = 120     # 被控对象侧 counts 限幅 = src/core/control.h 的 CMD_COUNT_CLAMP (忠实复现硬件)
     fov_radius: float = 150.0
     drop_p: float = 0.0        # 每帧独立丢失概率 (检测闪烁; 0=不丢帧)
 

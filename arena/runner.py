@@ -32,7 +32,9 @@ def run_suite(law_factory, scenarios=None, arena_cfg=None, s_belief=1.0,
             ac = ArenaConfig(s_true=s_true, L_true=L_true, h=arena_cfg.h,
                              fps=arena_cfg.fps, noise_std=arena_cfg.noise_std,
                              duration=sc.duration, count_limit=arena_cfg.count_limit,
-                             fov_radius=arena_cfg.fov_radius)
+                             fov_radius=arena_cfg.fov_radius,
+                             drop_p=arena_cfg.drop_p)   # 丢帧率必须跟着传: 漏了它, 调用方
+                                                        # 传进来的 flaky 变体会静默跑成干净场景
             m = run_one(law_factory(), sc, ac, s_belief, L_belief, max_v, sd)
             per.append(m)
         out[sc.name] = {"metrics": per, "agg": aggregate(per, sc.kind)}
