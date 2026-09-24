@@ -272,6 +272,13 @@ struct CalResult {
     const char* err = "";          // 整体失败原因
     float sigma[2] = {0, 0};       // 停顿静止窗估出的噪声底 (px/帧, 逐轴)
     int   sigma_n[2] = {0, 0};
+    // 停顿池的原始三件套 (σ 门的判据来源, 逐轴): 位移值域 [min,max]、恰好为 0 的条数、
+    //   相关系数峰 (resp) 的中位、被判为静止簇的块数中位 (9 块制)。σ=0 时它把"画面完全
+    //   静止"拆成可判的三种: 两帧完全相同 (resp≈1) / 投影退化 (resp=0 且值域 0) /
+    //   统计口径错 (值域非零却算出 σ=0)。
+    float sig_min[2] = {0, 0}, sig_max[2] = {0, 0};
+    int   sig_zero[2] = {0, 0};
+    float sig_resp[2] = {0, 0}, sig_nstatic[2] = {0, 0};
     float l_est = 0;               // 回写值 (仅 ok 时有效)
     // 读数族 (逐轴与全轮): 中位 + MAD + 条数
     float l_tail = 0, l_tail_mad = 0;     int l_tail_n = 0;

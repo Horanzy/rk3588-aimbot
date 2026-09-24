@@ -67,6 +67,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <ctime>
 #include <fstream>
 #include <functional>
 #include <iostream>
@@ -76,6 +77,7 @@
 
 #include <signal.h>
 #include <sys/epoll.h>
+#include <sys/stat.h>
 #include <sys/timerfd.h>
 #include <unistd.h>
 
@@ -106,6 +108,25 @@ int main(int argc, char* argv[]) {
     std::cout<<"========================================\n"
              <<"  AI 视觉自瞄 (ff_pi_acc 控制律)\n"
              <<"========================================\n";
+    // 构建身份: 日志里带上"这是哪个二进制跑的"。同一份日志该不该归因到某次改动,
+    //   靠的是构建本身可辨 (路径/大小/编译时刻), 不是记忆。
+    {
+        char exe[512] = {0};
+        const ssize_t n = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+        if (n > 0) {
+            std::cout << "二进制: " << exe;
+            struct stat st{};
+            if (stat(exe, &st) == 0) {
+                char tbuf[32] = {0};
+                std::time_t mt = (std::time_t)st.st_mtime;
+                std::tm tmv{};
+                if (localtime_r(&mt, &tmv))
+                    std::strftime(tbuf, sizeof(tbuf), "%m-%d %H:%M", &tmv);
+                std::cout << " (" << (long long)st.st_size << " 字节, 编译于 " << tbuf << ")";
+            }
+            std::cout << "\n";
+        }
+    }
 
     std::string a_m,a_c,a_t,a_y,a_d,a_n,a_x,a_l,a_S,a_k,a_v,a_r,a_D;
     std::string a_o,a_a,a_e,a_spd,a_adsspd; bool have_e=false;

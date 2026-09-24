@@ -300,14 +300,29 @@ CalResult cal_fit(CalMode mode, const std::deque<CalibSample>& hist,
         for (const auto& sg : plan)
             if (sg.pause && sg.axis == a && sg.begun && !sg.skipped) { has = true; break; }
         if (!has) { r.sigma[a] = 0.0f; r.sigma_n[a] = 0; continue; }
-        std::vector<float> nz;
+        std::vector<float> nz, nresp, nstat;
         for (const auto& sg : plan) {
             if (!sg.pause || sg.axis != a || !sg.begun || sg.skipped) continue;
             for (auto* s : pick(hist, shift_ms(sg.t0, (double)CAL_STATIC_FROM_MS), sg.t1))
-                if (s->ok[a]) nz.push_back(a ? s->sy : s->sx);
+                if (s->ok[a]) { nz.push_back(a ? s->sy : s->sx);
+                                nresp.push_back(s->resp[a]);
+                                nstat.push_back((float)s->n_static[a]); }
         }
         r.sigma_n[a] = (int)nz.size();
         if ((int)nz.size() < CAL_SIGMA_MIN_N) { r.err = "停顿静止参考样本不足"; return r; }
+        // 停顿池的原始量 (σ 门的来源, 只作诊断、不进任何判据; 上中位 = 排序后取 size/2)
+        {
+            const auto mid = [](std::vector<float> v) {
+                if (v.empty()) return 0.0f;
+                std::sort(v.begin(), v.end());
+                return v[v.size() / 2];
+            };
+            r.sig_min[a] = *std::min_element(nz.begin(), nz.end());
+            r.sig_max[a] = *std::max_element(nz.begin(), nz.end());
+            for (float v : nz) if (v == 0.0f) ++r.sig_zero[a];
+            r.sig_resp[a] = mid(nresp);
+            r.sig_nstatic[a] = mid(nstat);
+        }
         r.sigma[a] = 1.4826f * median_abs(nz);
         if (!(r.sigma[a] > 1e-3f)) {   // σ=0 = 停顿样本位移恒为零: 画面完全静止
             r.err = "画面完全静止 (停顿样本位移恒为 0): 无游戏或画面未响应";
@@ -490,6 +505,13 @@ void cal_print_diag(CalMode mode, const CalResult& r, size_t hist_n) {
            (double)r.sigma[0], (double)r.sigma[1], r.sigma_n[0], r.sigma_n[1],
            CAL_STATIC_FROM_MS, (double)r.dt_ms, r.dt_ms > 0 ? 1000.0 / (double)r.dt_ms : 0.0,
            r.n_seg_ok, r.n_seg_all);
+    // 停顿池的原始量: σ 为 0 时, 这三项决定它是哪一种零 (见 CalResult 的同名字段)
+    printf("[标定] 停顿池: x n=%d 值域[%.3f,%.3f] 零值 %d/%d resp中位 %.3f 静止块中位 %.1f/9 "
+           "| y n=%d 值域[%.3f,%.3f] 零值 %d/%d resp中位 %.3f 静止块中位 %.1f/9\n",
+           r.sigma_n[0], (double)r.sig_min[0], (double)r.sig_max[0], r.sig_zero[0], r.sigma_n[0],
+           (double)r.sig_resp[0], (double)r.sig_nstatic[0],
+           r.sigma_n[1], (double)r.sig_min[1], (double)r.sig_max[1], r.sig_zero[1], r.sigma_n[1],
+           (double)r.sig_resp[1], (double)r.sig_nstatic[1]);
     printf("[标定] 读数: 尾迹 %d 条 中位 %.1f 离散 %.1fms | 停止沿 %d 条 中位 %.1f 离散 %.1fms "
            "| 起始沿 %d 条 中位 %.1f 离散 %.1fms (单位 ms, 散度 = MAD)\n",
            r.l_tail_n, (double)r.l_tail, (double)r.l_tail_mad,
