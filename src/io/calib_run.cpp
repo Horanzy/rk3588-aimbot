@@ -295,6 +295,26 @@ CalResult cal_fit(CalMode mode, const std::deque<CalibSample>& hist,
     r.dt_ms = (float)frame;
 
     // ---- [1] 噪声底 σ: 停顿的静止参考窗 (池化; 只覆盖被激励的轴) ----
+    // σ 门失败时的现场: **激励段窗内**的样本。正常路径下这些量由逐段读数给出, 但 σ 一失败
+    //   就在此返回, 逐段读数根本不会生成 —— 而"采样器到底看不看得见激励运动"只有这里能答:
+    //   逐帧|位移| 非 0 = 采样器看见了运动 (那 σ=0 就只可能是停顿窗本身确定);
+    //   全 0 = 采样器对运动视而不见 (取像/几何一侧的病, 与场景无关)。
+    auto print_exc = [&]() {
+        for (size_t k = 0; k < plan.size() && k < (size_t)CAL_SEGS_MAX; ++k) {
+            const CalSegWin& sg = plan[k];
+            if (sg.pause || !sg.begun || sg.skipped || sg.dir == 0) continue;
+            std::vector<float> d;
+            for (auto* s : pick(hist, sg.t0, sg.t1))
+                if (s->ok[sg.axis]) d.push_back(sg.axis ? s->sy : s->sx);
+            double sum = 0;
+            std::vector<float> mag;
+            for (float v : d) { sum += v; mag.push_back(std::fabs(v)); }
+            printf("[标定] 激励段诊断: 槽 %zu 轴%c 向%+d n=%zu 位移和 %+.1fpx 逐帧|位移|中位 %.2fpx\n",
+                   k, sg.axis ? 'Y' : 'X', (int)sg.dir, d.size(), sum,
+                   (double)(mag.empty() ? 0.0f : median_of(mag)));
+        }
+        fflush(stdout);
+    };
     for (int a = 0; a < 2; ++a) {
         bool has = false;
         for (const auto& sg : plan)
@@ -309,7 +329,7 @@ CalResult cal_fit(CalMode mode, const std::deque<CalibSample>& hist,
                                 nstat.push_back((float)s->n_static[a]); }
         }
         r.sigma_n[a] = (int)nz.size();
-        if ((int)nz.size() < CAL_SIGMA_MIN_N) { r.err = "停顿静止参考样本不足"; return r; }
+        if ((int)nz.size() < CAL_SIGMA_MIN_N) { print_exc(); r.err = "停顿静止参考样本不足"; return r; }
         // 停顿池的原始量 (σ 门的来源, 只作诊断、不进任何判据; 上中位 = 排序后取 size/2)
         {
             const auto mid = [](std::vector<float> v) {
@@ -325,6 +345,7 @@ CalResult cal_fit(CalMode mode, const std::deque<CalibSample>& hist,
         }
         r.sigma[a] = 1.4826f * median_abs(nz);
         if (!(r.sigma[a] > 1e-3f)) {   // σ=0 = 停顿样本位移恒为零: 画面完全静止
+            print_exc();
             r.err = "画面完全静止 (停顿样本位移恒为 0): 无游戏或画面未响应";
             return r;
         }
