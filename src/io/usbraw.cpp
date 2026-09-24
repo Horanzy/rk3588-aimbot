@@ -582,6 +582,30 @@ static void out_loop(UsbRawSession* s) {
 //   时给出解绑/绑回命令, 人不用再翻文档。自身持着一份描述符 (会话已 open) 是既定
 //   事实, 排除自己。udc_inst 取内核 uapi 的 UDC 实例名 (usb_raw_init.device_name,
 //   unsigned char[128]) —— 与它的类型直接匹配, ostream 对 unsigned char* 按 C 字符串输出。
+// 第三种占用 (已死会话的内核残绑定) 的自愈: 判据是"没有任何进程持有 /dev/raw-gadget" ——
+//   活着的持有者一定有那个 fd, 扫得到; 反过来扫不到就只剩残绑定 (configfs 那一路归
+//   setup_platform.sh, 它在每次启动前都会清)。做法就是文档里的解绑/绑回 dwc3 (实测有效,
+//   数秒、不掉其它功能; 强制解绑会让卡住的 ioctl 返回, 内核会因此留一条一次性 oops 记录,
+//   响但无碍)。本进程已是 root, 直接写 sysfs, 不需要 tee。
+static bool udc_strand_recover(const unsigned char* udc_inst) {
+    if (!proc_fd_holders("/dev/raw-gadget", (int)getpid()).empty()) return false;
+    const char* up = "/sys/bus/platform/drivers/dwc3/unbind";
+    const char* bp = "/sys/bus/platform/drivers/dwc3/bind";
+    auto put = [&](const char* path) {
+        const int fd = open(path, O_WRONLY);
+        if (fd < 0) return false;
+        const size_t n = strlen((const char*)udc_inst);
+        const bool ok = write(fd, udc_inst, n) == (ssize_t)n;
+        close(fd);
+        return ok;
+    };
+    if (!put(up)) return false;
+    usleep(200 * 1000);
+    if (!put(bp)) return false;
+    usleep(500 * 1000);                       // 等 UDC 重新注册 (实测数秒内可再用)
+    return true;
+}
+
 static void report_udc_holders(const unsigned char* udc_inst) {
     const std::vector<std::pair<int, std::string>> holders =
         proc_fd_holders("/dev/raw-gadget", (int)getpid());
@@ -636,11 +660,20 @@ bool usbraw_start(UsbRawSession& s, const UsbRawDeviceDef& dev) {
         return false;
     }
     if (ioctl(s.fd, USB_RAW_IOCTL_RUN, 0) < 0) {
-        const int e = errno;
+        int e = errno;
         std::cerr << "❌ raw_gadget RUN 失败: " << strerror(e) << "\n";
-        if (e == EBUSY) report_udc_holders(init.device_name);
-        close(s.fd); s.fd = -1;
-        return false;
+        if (e == EBUSY) {
+            report_udc_holders(init.device_name);
+            // 点完名再动手: 判据 (无持有者) 成立就把 UDC 的残绑定清掉, 然后**重试一次 RUN** ——
+            //   会话 INIT 过但没 RUN 过, 控制器重建后同一个 fd 可以再试 (试不成仍按失败出去,
+            //   不把状态弄得更糟: 手工那条路照旧)。
+            if (udc_strand_recover(init.device_name)) {
+                std::cerr << "   → 已解绑/绑回 dwc3 (清死会话残绑定), 重试 RUN\n";
+                if (ioctl(s.fd, USB_RAW_IOCTL_RUN, 0) == 0) e = 0;
+                else std::cerr << "   ⚠ 重试仍失败: " << strerror(errno) << "\n";
+            }
+        }
+        if (e != 0) { close(s.fd); s.fd = -1; return false; }
     }
     // 请求电流 = 配置节 bMaxPower 声明值 (uapi 单位 2mA, 与 bMaxPower 同单位;
     //   内核侧 usb_gadget_vbus_draw(2 × value) mA。传 mA 会请求 2 倍), 须在
