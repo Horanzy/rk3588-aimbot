@@ -727,7 +727,13 @@ more means they are not repeats of one physical measurement), tail-vs-start-edge
 standard errors + one frame + 30 % of `L` (the last two are the edge's quantization and the law's proven
 mismatch band), a family needs **≥ 5 readings** to be aggregated at all, and the σ pool needs **≥ 20 static
 samples per axis** (median + MAD's minimum sample size; a family is that mode's readings pooled — 8 for
-hid's two axes, 6 for pad's one — and the plan gives 4 pauses per axis to feed the σ pool), `L` inside its
+hid's two axes, 6 for pad's one — and the plan gives 4 pauses per axis to feed the σ pool), **σ floored at
+the estimator's own resolution when the source has no noise** (`CAL_SIGMA_FLOOR_PX` = 0.01 px = the 1-D
+projection's measured accuracy: a deterministic digital source renders bit-identical quiet frames —
+measured `resp` exactly 1.000 and a displacement range of ±0.001 px — so σ comes out exactly 0, and the
+gates then take the measurement resolution as their envelope rather than failing the round with "no game or
+the picture isn't responding", a reading that mistook a *deterministic* source for a dead one; a genuinely
+frozen source is still caught, but by the segment readings — zero travel — which is the right reason), `L` inside its
 physical band, and **at least one segment with measured motion** (otherwise the whole round fails: "screen
 not responding"). Aggregation is median + MAD per reading family; the written value is the tail family's
 median (the stop-edge family is the fallback when no tail survives, and is announced). For hid the two

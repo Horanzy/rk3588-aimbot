@@ -187,6 +187,14 @@ constexpr float CAL_EDGE_SNR       = 3.0f;   // 边沿/响应检出 (σ 倍数)
 constexpr int   CAL_TRIGGER_MS     = CALIB_TRIGGER_TICKS * 1000 / DEFAULT_FREQ;
 constexpr float CAL_RESP_MIN       = 0.05f;  // 相关峰中位下限 (纹理地板; 纳入门的 5 倍)
 constexpr int   CAL_SIGMA_MIN_N    = 20;     // 静止窗池化样本数下限 (中位 SE ≤30%)
+// σ (噪声底) 的地板 = 测量链自身的分辨率。数字源 + 确定性渲染时, 静止窗相邻两帧逐像素相同
+//   (实测 resp 恰为 1.000、位移值域 ±0.001px), σ 因此精确为 0 —— 而 σ 是三个门 (起始沿的
+//   噪声包络 K·σ√n、到位即停、一致性容差) 唯一的尺度, 为 0 就没有尺度可言。此处取 0.01px:
+//   一维投影相位相关的实测精度 (见 core/calib.h 头部的 1-D vs 2-D 对照, build/calib_test
+//   的 [3] 段在合成帧上复现同一批定义)。手法与 stat_of 对边沿读数用的"量化底"一致 ——
+//   量化是物理的, 不能当零。地板只抬不降: 有噪声的源 (实测 σ 0.01–0.1px) 一点不受影响;
+//   真正冻结的源仍会被抓住, 但由**激励段**读数抓 (行程为 0 → 不可测), 理由才是对的。
+constexpr float CAL_SIGMA_FLOOR_PX = 0.01f;
 constexpr int   CAL_MIN_READINGS   = 5;      // 每个读数族的最少读数 (中位+MAD 的最小样本量)
 constexpr float CAL_DISP_FRAMES    = 1.0f;   // 散度门 (× 实测采样间隔 dt)
 constexpr float CAL_CONSIST_Z      = 3.0f;   // 两读数一致性 (3 倍合并标准误)

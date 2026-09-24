@@ -319,7 +319,7 @@ CalResult cal_fit(CalMode mode, const std::deque<CalibSample>& hist,
         bool has = false;
         for (const auto& sg : plan)
             if (sg.pause && sg.axis == a && sg.begun && !sg.skipped) { has = true; break; }
-        if (!has) { r.sigma[a] = 0.0f; r.sigma_n[a] = 0; continue; }
+        if (!has) { r.sigma[a] = CAL_SIGMA_FLOOR_PX; r.sigma_n[a] = 0; continue; }
         std::vector<float> nz, nresp, nstat;
         for (const auto& sg : plan) {
             if (!sg.pause || sg.axis != a || !sg.begun || sg.skipped) continue;
@@ -344,10 +344,14 @@ CalResult cal_fit(CalMode mode, const std::deque<CalibSample>& hist,
             r.sig_nstatic[a] = mid(nstat);
         }
         r.sigma[a] = 1.4826f * median_abs(nz);
-        if (!(r.sigma[a] > 1e-3f)) {   // σ=0 = 停顿样本位移恒为零: 画面完全静止
-            print_exc();
-            r.err = "画面完全静止 (停顿样本位移恒为 0): 无游戏或画面未响应";
-            return r;
+        // 静止窗测不到噪声: 不判失败, 取测量链分辨率作地板 ( CAL_SIGMA_FLOOR_PX 的出处见其定义)。
+        //   确定性数字源就会走到这里 —— 判"画面完全静止"曾把'源逐帧确定'误报成'无游戏或画面
+        //   未响应', 而那时激励段明明每帧走 12px。
+        if (r.sigma[a] < CAL_SIGMA_FLOOR_PX) {
+            printf("[标定] 轴%c 静止窗无噪声 (σ=%.4f < 地板 %.3fpx): 按估计器分辨率定阈值 "
+                   "(源逐帧确定; 冻结源由激励段读数抓)\n",
+                   a ? 'Y' : 'X', (double)r.sigma[a], (double)CAL_SIGMA_FLOOR_PX);
+            r.sigma[a] = CAL_SIGMA_FLOOR_PX;
         }
     }
 
