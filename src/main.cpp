@@ -236,6 +236,7 @@ int main(int argc, char* argv[]) {
     float max_spd =std::clamp(numf(!a_x.empty()?a_x:get_input_with_default("最大速度","2667"),"-x"),SPD_CAP_MIN,SPD_CAP_MAX);
     const float max_v=max_spd/1000.0f;
     float init_l=std::clamp(numf(a_l.empty()?std::to_string((int)L_INIT_MS):a_l,"-l"),L_MIN,L_MAX);
+    if (!args_ok) return 1;                       // 参数面先失败 (锁已取, 设备一个都还没碰)
     const std::string persist_path=a_S;
     // 拉枪速度倍率 (核心语义见 core/state.h): 有效灵敏度 = 基线/(倍率/100),
     //   --spd <x>[,<y>] (y 省略 = 与 x 同) / --ads-spd <x>[,<y>]; 缺省 = 100 = 基线。
@@ -293,6 +294,7 @@ int main(int argc, char* argv[]) {
     jpeg_q=std::clamp(jpeg_q,1,100);
     float fov_r=std::clamp(numf(a_r.empty()?std::to_string((int)FOV_RADIUS):a_r,"-r"),
                            FOV_RADIUS_MIN,FOV_RADIUS_MAX);
+    if (!args_ok) return 1;                       // 同上: 每段解析各自收口, 不是只在开头拦一次
 
     // 鼠标接管 (默认开) 与截图源 (默认全开; -e 给出时以该列表为准, 可为空 = 全关)
     bool aim_on=!(a_a=="n"||a_a=="N");
