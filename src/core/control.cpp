@@ -168,8 +168,8 @@ void law_tick(const LawIn& in, LawOut& out) {
                     // hid 落点: 每轴有效 s = 基数×100/spd_axis — 调大 spd = s 变小
                     //   = 发更多 counts = 更快; 与账本→像素换算同一口径
                     rem_x+=vcx*TICK_MS/sc.x; rem_y+=vcy*TICK_MS/sc.y;
-                    int sx=std::clamp((int)std::trunc(rem_x),-120,120);
-                    int sy=std::clamp((int)std::trunc(rem_y),-120,120);
+                    int sx=std::clamp((int)std::trunc(rem_x),-CMD_COUNT_CLAMP,CMD_COUNT_CLAMP);
+                    int sy=std::clamp((int)std::trunc(rem_y),-CMD_COUNT_CLAMP,CMD_COUNT_CLAMP);
                     rem_x-=sx;rem_y-=sy; fx+=sx;fy+=sy;
                 }
             } else { rem_x=rem_y=0; int_x=int_y=0; }

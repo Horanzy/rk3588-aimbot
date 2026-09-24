@@ -106,6 +106,18 @@ extern std::atomic<bool>  g_aim_enabled;             // 鼠标接管 (-a / 热�
 extern std::atomic<bool>  g_cap_fire;                // 采集源开关 (-e / 热参): 开火截图
 extern std::atomic<bool>  g_cap_det;                 //   检测截图
 extern std::atomic<bool>  g_cap_auto;                //   定时截图
+
+// ---- 数值参数的夹取带 (唯一定义点): 命令行给的是初值, 热参给的是运行中那一份 —— 两处
+//      同带, 于是"命令行绕过热参夹取"这种缝不存在 (-t/-y 曾只在热参侧夹取)。带本身的
+//      出处: 置信度是概率, 偏移是满量程百分比, 速度帽与 FOV 半径的带是防误输入 (有意义
+//      的带见各常量自己的注释)。 ----
+constexpr float CONF_THR_MIN = 0.0f,   CONF_THR_MAX = 1.0f;
+constexpr float Y_OFF_PCT_MIN = 0.0f,  Y_OFF_PCT_MAX = 100.0f;
+constexpr float SPD_CAP_MIN = 100.0f,  SPD_CAP_MAX = 20000.0f;   // 速度帽 px/s (有意义带见 AGENTS 的 -x 推导)
+constexpr float FOV_RADIUS_MIN = 10.0f, FOV_RADIUS_MAX = 1000.0f;
+// 起手延迟 (ms): 标定是 L 的唯一起源, 它只在第一轮标定之前被用到 —— 取带 [L_MIN, L_MAX]
+//   的中点 60 是选择规则 (中点的先验误差最小), 一轮标定就把它换掉。
+constexpr float L_INIT_MS = 60.0f;
 // ---- 拉枪速度倍率 (CLI --spd/--ads-spd, 热参 spdx/spdy/adsspdx/adsspdy) ----
 // 四个值唯一, 逐轴: 腰射一对, ADS 键按住期间一对 (整套换, 不逐位混搭)。刻度与基线
 //   的定义见上方 "拉枪速度倍率 (spd)"。
@@ -144,7 +156,7 @@ struct TargetState {
     float cs = 0;                                // CUSUM 告警电平 (σ 倍数归一, 信任度来源)
     bool  valid = false;
     std::chrono::steady_clock::time_point t_pub;
-    float l_est_ms = 60.0f;                      // 标定量: 环路延迟 (ms), 唯一被回写的量
+    float l_est_ms = L_INIT_MS;                  // 标定量: 环路延迟 (ms), 唯一被回写的量
     std::mutex mtx;
 };
 extern TargetState g_target;

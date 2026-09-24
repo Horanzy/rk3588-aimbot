@@ -222,14 +222,13 @@ struct CalSegWin {
     bool   begun = false;        // 已开播 (未触碰的槽位与已播放的区分)
     bool   skipped = false;      // 该轴不响应, 被跳过 (不出现在拟合里)
     bool   timeout = false;      // 因超时结束 (行程未达目标)
-    bool   moved = false;        // 状态机读到过非零累计行程 (播放期的现场记录)
     std::chrono::steady_clock::time_point t0{}, t1{};
 };
 class CalWinTable {
 public:
     void reset(CalMode m);
     void begin_seg(int i, std::chrono::steady_clock::time_point t);
-    void end_seg(int i, std::chrono::steady_clock::time_point t, bool timeout, bool moved);
+    void end_seg(int i, std::chrono::steady_clock::time_point t, bool timeout);
     void mark_skipped(int i);
     void clear();
     std::vector<CalSegWin> snapshot() const;

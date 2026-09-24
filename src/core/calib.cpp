@@ -57,8 +57,12 @@ double calib_pc1d(const cv::Mat& a, const cv::Mat& b, const cv::Mat& win, double
     const int n = a.cols;
     cv::Mat fa(n, 1, CV_32F), fb(n, 1, CV_32F);
     for (int i = 0; i < n; ++i) {
-        fa.at<float>(i, 0) = a.at<float>(0, i) * win.at<float>(0, i);
-        fb.at<float>(i, 0) = b.at<float>(0, i) * win.at<float>(0, i);
+        // 窗按**它自己的朝向**取: 一维投影是 1×n 行向量, 而窗随之有 1×n (rowvec) 与
+        //   n×1 两种写法 —— 对 n×1 写 at<float>(0,i) 只是"连续 Mat 的线性序恰好等于
+        //   (i,0)"才拿到正确值, 形状上已越界 (调试构建会断言), 非连续数据则静默错窗。
+        const float wv = win.rows > 1 ? win.at<float>(i, 0) : win.at<float>(0, i);
+        fa.at<float>(i, 0) = a.at<float>(0, i) * wv;
+        fb.at<float>(i, 0) = b.at<float>(0, i) * wv;
     }
     cv::Mat A, B;
     cv::dft(fa, A, cv::DFT_COMPLEX_OUTPUT);
@@ -180,6 +184,7 @@ bool persist_calibration(const std::string& path, const std::string& var, float 
     std::vector<std::string> lines;
     for (int attempt = 0; attempt < PERSIST_ATTEMPTS; ++attempt) {
         if (!read_lines(path, lines)) return false;
+        const std::vector<std::string> orig = lines;   // 改前的内容: 后面只拿它判"这一段里被谁动过没有"
         bool found=false;
         for (auto& ln:lines) {
             if (ln.rfind(key,0)!=0) continue;
@@ -218,7 +223,10 @@ bool persist_calibration(const std::string& path, const std::string& var, float 
         //   它不是零, 面板那侧的强制竞争实测见 webui/README.md。用尽 PERSIST_ATTEMPTS 仍落笔
         //   —— 标定结论是这一轮的交付物, 不因为持续竞争而不写; 那时只剩那个固有残留窗口。
         std::vector<std::string> now;
-        const bool moved = read_lines(path, now) && now != lines;
+        // 比的是**改前**那份 (orig): 拿改后的 lines 去比永远不等, 那样每次回写都会白烧满预算,
+        //   而"用尽预算仍落笔"那条兜底 (留给持续竞争的那一次) 就永远走不到 —— 判据必须能区分
+        //   "文件还是我们读到的样子"与"这一段里被别人写过"。
+        const bool moved = read_lines(path, now) && now != orig;
         if (moved && attempt + 1 < PERSIST_ATTEMPTS) { unlink(tmp.c_str()); continue; }
 
         if (have) { chmod(tmp.c_str(),st.st_mode); chown(tmp.c_str(),st.st_uid,st.st_gid); }

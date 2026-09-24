@@ -762,6 +762,11 @@ bool HdmiIn::wait_fence(int fd, std::string* err) {
             char b[64];
             std::snprintf(b, sizeof(b), "0x%x", p.revents);
             set_err(err, std::string("帧的 dma-fence 报了异常 revents=") + b + " (载荷状态不明)");
+            // 这一支同样没拿到完成凭据, 故与超时记在同一本账上: 两个消费者都按
+            //   waits − timeouts 数成功次数 (等待均值只对成功那几次求和), 漏记就会把它
+            //   算成一次零耗时的成功等待。
+            ++fence_timeouts_;
+            last_fence_wait_us_ = (double)(now_us() - t0);
             close_fence(fd);
             return false;
         }

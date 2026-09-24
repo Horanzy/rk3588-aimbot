@@ -115,7 +115,6 @@ public:
 
     const std::vector<NpuTensor>& inputs() const { return in_; }
     const std::vector<NpuTensor>& outputs() const { return out_; }
-    const std::string& model_path() const { return path_; }
     int  input_side() const { return input_side_; }   // 方形输入边长; 非方形 = 0
     size_t kept_outputs() const;
     size_t in_bytes() const { return in_bytes_; }     // 每 tick 的 H2D 字节数

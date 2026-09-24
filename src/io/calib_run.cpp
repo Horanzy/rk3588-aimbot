@@ -97,12 +97,10 @@ void CalWinTable::begin_seg(int i, std::chrono::steady_clock::time_point t) {
     if (i >= 0 && i < (int)segs_.size()) {
         segs_[(size_t)i].begun = true; segs_[(size_t)i].t0 = t; segs_[(size_t)i].t1 = t; }
 }
-void CalWinTable::end_seg(int i, std::chrono::steady_clock::time_point t,
-                          bool timeout, bool moved) {
+void CalWinTable::end_seg(int i, std::chrono::steady_clock::time_point t, bool timeout) {
     std::lock_guard<std::mutex> lk(mtx_);
     if (i >= 0 && i < (int)segs_.size()) {
-        segs_[(size_t)i].t1 = t; segs_[(size_t)i].timeout = timeout;
-        segs_[(size_t)i].moved = moved; }
+        segs_[(size_t)i].t1 = t; segs_[(size_t)i].timeout = timeout; }
 }
 void CalWinTable::mark_skipped(int i) {
     std::lock_guard<std::mutex> lk(mtx_);
@@ -708,9 +706,7 @@ CalStep cal_step(CalMode mode, uint16_t btns, int cam_fps,
             else if (s.pt + 1 >= ms_to_ticks(CAL_SEG_TIMEOUT_MS)) { stop = true; timeout = true; }
         }
         if (stop) {
-            const bool moved = (g_cal_live_slot.load() == s.pi)
-                            && (g_cal_live_travel.load() > 0.0f);
-            g_cal_win.end_seg(s.pi, now, timeout, moved);
+            g_cal_win.end_seg(s.pi, now, timeout);
             if (timeout) {
                 char lab[24];
                 if (mode == CAL_MODE_PAD)

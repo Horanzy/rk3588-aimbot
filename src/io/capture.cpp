@@ -635,7 +635,10 @@ void ai_thread(std::string model_path, int target_cls, int num_classes,
                                                    : cv::Scalar(0, 255, 0), 2);
                 }
                 cv::imshow("Aimbot", pv);
-                if (cv::waitKey(1) == 27) break;
+                // ESC = 结束这次运行, 不是只关掉预览窗: 只 break 出本循环的话, 采集线程
+                //   退出了而进程还活着 (鼠标独占与 UDC 会话都在, 检测却停了), 面板照样
+                //   显示实例在跑 —— 而且没有别的命令能进这个状态, 只能杀进程。
+                if (cv::waitKey(1) == 27) { global_running = false; break; }
             }
         }
         in.release(f.index);

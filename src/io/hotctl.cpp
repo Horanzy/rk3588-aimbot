@@ -33,11 +33,13 @@ bool hotctl_apply(const char* key, const char* val) {
         ||!strcmp(key,"padthr")) {
         float v=0;
         if (!num_val(val,v)) { std::cout<<"[热参] 忽略 "<<key<<"="<<val<<" (非数值)\n"; return false; }
-        if      (!strcmp(key,"t"))   { v=std::clamp(v,0.0f,1.0f);       g_conf_thr.store(v); }
-        else if (!strcmp(key,"y"))   { v=std::clamp(v,0.0f,100.0f);     g_y_off_pct.store(v); }
-        else if (!strcmp(key,"x"))   { v=std::clamp(v,100.0f,20000.0f); g_max_v.store(v/1000.0f); }
+        // 夹取带取 core/state.h 的唯一定义点 (命令行侧同一份, 见 src/main.cpp): 两处同带,
+        //   于是"命令行给的值"与"热改给的值"落在同一个工作点上。
+        if      (!strcmp(key,"t"))   { v=std::clamp(v,CONF_THR_MIN,CONF_THR_MAX);      g_conf_thr.store(v); }
+        else if (!strcmp(key,"y"))   { v=std::clamp(v,Y_OFF_PCT_MIN,Y_OFF_PCT_MAX);    g_y_off_pct.store(v); }
+        else if (!strcmp(key,"x"))   { v=std::clamp(v,SPD_CAP_MIN,SPD_CAP_MAX);        g_max_v.store(v/1000.0f); }
         else if (!strcmp(key,"padthr")) { v=std::clamp(v,0.0f,100.0f);  g_pad_trig_thr.store(v); }
-        else                         { v=std::clamp(v,10.0f,1000.0f);   g_fov_radius.store(v); }
+        else                         { v=std::clamp(v,FOV_RADIUS_MIN,FOV_RADIUS_MAX);  g_fov_radius.store(v); }
         std::cout<<"[热参] "<<key<<"="<<v<<"\n";
         return true;
     }

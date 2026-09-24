@@ -116,7 +116,24 @@ bool proc_is_ours(int pid, const std::string& root) {
            && exe[root.size()] == '/';
 }
 
-static bool pid_gone(int pid) { return kill(pid, 0) != 0 && errno == ESRCH; }
+// "已结束"必须把**僵尸**一起算进去: 进程已死而父进程尚未收尸时 kill(pid,0) 仍返回成功,
+//   而锁早已随死亡由内核释放 —— 只按 ESRCH 判会把一次成功的接管报成失败 (调用方据此
+//   跳过取锁重试并退出非 0)。判据看 /proc/<pid>/stat 的态字: 读不到 = 已回收, Z/X = 死了未收尸。
+static bool pid_gone(int pid) {
+    if (kill(pid, 0) != 0 && errno == ESRCH) return true;
+    const int fd = open(("/proc/" + std::to_string(pid) + "/stat").c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return true;                        // 读不到就是不在 (权限受限时宁可视其为已走: 锁另有判据)
+    char buf[256];
+    const ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    ::close(fd);
+    if (n <= 0) return true;
+    const std::string s(buf, (size_t)n);
+    // comm (第 2 字段) 可以含空格与括号, 故态字取**最后一个 ')' 之后**的那一个字符
+    const size_t rp = s.find_last_of(')');
+    if (rp == std::string::npos || rp + 2 >= s.size()) return false;
+    const char st = s[rp + 2];
+    return st == 'Z' || st == 'X';
+}
 
 static bool wait_pid_gone(int pid, int ms) {
     for (int t = 0; t < ms; t += 20) {
@@ -156,7 +173,7 @@ bool instance_lock_acquire() {
     // 两轮: 第一轮失败且持有者是本库自己的进程时接管它, 第二轮取锁即成功。第二轮的
     //   失败路径就是终局 (外人持有, 或接管之后锁仍取不到)。
     bool remnant_tried = false;
-    for (int attempt = 0; attempt < 4; ++attempt) {   // 上限: 两次 takeover 尝试 + 一次残骸重建
+    for (int attempt = 0; attempt < 4; ++attempt) {   // 上限: 首次取锁 + 接管后重取 + 残骸重建后重取
         if (flock(fd, LOCK_EX | LOCK_NB) == 0) {
             // 内容 = 自己的 pid, 给后来者点名用。锁本身与它无关 (内核在 fd 上记账),
             //   故写失败只是少一行信息, 不影响独占性 —— 报警告, 不失败。

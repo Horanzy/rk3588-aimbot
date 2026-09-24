@@ -126,7 +126,6 @@ public:
 
     int window_side() const { return win_side_; }      // W (律/FOV/标定的坐标域边长)
     int model_side()  const { return model_side_; }    // 模型输入边长 (由运行时自述)
-    int num_classes() const { return num_classes_; }
     const NpuSession& npu() const { return npu_; }
 
     // 一次推理: 源 dmabuf → W RGB → [二级裁剪到模型输入] → NPU tick → 解码 → NMS,

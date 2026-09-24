@@ -18,20 +18,6 @@
 struct Dims { int nbDims=0; int64_t d[8]={}; };
 enum class DataType { kFLOAT, kHALF, kINT8, kINT32, kBOOL };
 
-inline size_t elemSize(DataType dt) {
-    switch (dt) {
-        case DataType::kFLOAT: return 4; case DataType::kHALF: return 2;
-        case DataType::kINT8: return 1;  case DataType::kINT32: return 4;
-        case DataType::kBOOL: return 1;  default: return 0;
-    }
-}
-inline size_t volume(const Dims& d) {
-    size_t v=1; for (int i=0;i<d.nbDims;++i) v*=d.d[i]; return v;
-}
-inline bool hasDynamicDim(const Dims& d) {
-    for (int i=0;i<d.nbDims;++i) if (d.d[i]<0) return true; return false;
-}
-
 // 导出网格头三个特征层的步长: 8/16/32 (输入边长的 1/8、1/16、1/32)。三个候选数
 //   实测值 (320→2100、416→3549、640→8400) 与 (S/8)²+(S/16)²+(S/32)² 逐个吻合,
 //   10647 = 3×3549 亦然 —— 这就是"锚点数由模型几何给出"的那条物理关系。

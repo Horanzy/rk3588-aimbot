@@ -192,8 +192,8 @@ constexpr int HDMI_LOCK_WAIT_MS = 2000;
 constexpr int HDMI_LOCK_POLL_MS = 200;
 
 // 等 dma-fence 的上限: 低延迟模式给出的完成通知早于载荷写完, fence 才是写完的凭据
-//   (实测 120fps 下 5.27ms, 即约 0.63 个帧周期), 而本层支持的信号最低到 60fps
-//   (帧周期 16.7ms) —— 上限取 2 个 60fps 帧周期再取整 = 40ms。
+//   (实测成功等待的均值在 120fps 下约 0.6 个帧周期 —— 落点见本文件末"实测落点"一段),
+//   而本层支持的信号最低到 60fps (帧周期 16.7ms) —— 上限取 2 个 60fps 帧周期再取整 = 40ms。
 //   选择规则 (改这个数要按它算): fence 在该帧载荷写完时 signal, 而这个时刻落在这一帧的
 //   传输窗口内, 故**合法等待 ≤ 一个帧周期**; 上限取它的 2 倍 = 给最慢支持信号 (60fps 的
 //   16.7ms) 与调度抖动留的整倍余量 —— 不能再小: 压到 20ms 就是 1.2 倍余量, 会把"晚一点
@@ -215,6 +215,8 @@ constexpr int HDMI_FENCE_WAIT_MS = 40;
 //   not signal, signal now!, 所以单次超时是驱动能自愈的丢帧)。HDMI_BUF_DEFAULT − 1 帧
 //   = 缓冲整整转完一圈而**没有一帧载荷写完** —— 那不是丢一帧, 是流不再产数据 (重建才是
 //   恢复路径)。按 40ms 上限算, 这条线对应 120ms 的窗口。
+//   本线按**缺省块数**导出 (三个调用点都传缺省): open() 传别的块数时它不随之变 —— 它要的是
+//   "缓冲转完一圈没有一帧载荷写完"这个物理量, 而块数是参数, 改块数的人要同时改这里。
 constexpr int HDMI_FENCE_FAIL_MAX = HDMI_BUF_DEFAULT - 1;
 
 // wait_frame 的一次 poll 分片: 分片结束且无帧时查一次接收器锁定状态 —— "信号掉了"只有
@@ -362,13 +364,11 @@ public:
     //   探针用它复现"低延迟模式的完成通知早于载荷写完"这条结论: 默认 0 字节变化,
     //   --no-fence 时非 0。
     void set_fence_wait(bool on) { fence_wait_ = on; }
-    bool fence_wait_enabled() const { return fence_wait_; }
 
     // ---- 观测 (探针与日志) ----
     const std::string& dev_path() const { return dev_path_; }
     const std::string& driver()   const { return driver_; }
     const HdmiFormat&  format()   const { return fmt_; }
-    const v4l2_bt_timings& timings() const { return timing_; }
     const std::vector<HdmiBuffer>& buffers() const { return bufs_; }
     int      low_latency() const { return low_latency_; }
     HdmiDelivery delivery() const { return delivery_; }
@@ -380,8 +380,9 @@ public:
     // 上一帧等 dma-fence 的实际耗时 (µs): 交付延迟里低延迟模式的固有成分, 探针据此把它
     //   与 userspace 侧开销分开报 (两者合起来才是"拿到手时这帧有多旧")
     double   last_fence_wait_us() const { return last_fence_wait_us_; }
-    // fence 等待的账 (HDMI_FENCE_WAIT_MS 那条选择规则的实测落点): 等过多少次 / 其中等到
-    //   超时多少次 / 等待总时长与最长一次 (µs)。**成功的等待不超过一个帧周期, 超时的那几次
+    // fence 等待的账 (HDMI_FENCE_WAIT_MS 那条选择规则的实测落点): 等过多少次 / 其中没拿到
+    //   完成凭据多少次 (超时, 或 fence 报了异常 revents — 两支都不产生成功等待的时长) /
+    //   等待总时长与最长一次 (µs)。**成功的等待不超过一个帧周期, 超时的那几次
     //   烧掉的恰好是上限** —— 把这两个量分开是"上限该多大"唯一诚实的判据。
     uint64_t fence_timeouts()   const { return fence_timeouts_; }
     double   fence_wait_us_sum() const { return fence_wait_us_sum_; }

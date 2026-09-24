@@ -44,6 +44,12 @@ const float ACC_RB_HOLD_N  = 1.5f;   // 重建旗标最短保持 = N·(T/β) (α
 const float ACC_OW_ACTIV_K = 2.0f;   // 自身活动门限 θ_a = max_v/(K·L̂) (K 个延迟窗走完速度帽算剧烈)
 const float ACC_SNR        = 10.0f;  // â 显著性地板倍数 (盖过失配带相关 dither 噪声驱动的均值游走)
 
+// 单拍指令的硬上限 (counts, hid 落点): 120 counts/拍 @1kHz = 120 px/ms (hid 基线
+//   1 px/count), 而出厂速度帽 -x 2667 px/s 只有 2.67 px/ms —— 它是帽的 45 倍, 故这不是
+//   控制带而是失控保护: 只有积分器飞掉才撞得到, 撞到也只是让单份报告不成一次瞬移。
+//   取 120 = 便于读的整百值 (选择规则); 它不参与"追不追得上"的约束 (那是 -x 的活)。
+const int CMD_COUNT_CLAMP = 120;
+
 // ========================= 触发键位 (HID 按钮位掩码) =========================
 const uint16_t LEFT_KEY  = 0x01;
 const uint16_t RIGHT_KEY = 0x02;

@@ -113,6 +113,26 @@ int main(int argc, char* argv[]) {
     int fire_ms=300; double auto_s=10;
     int cooldown_ms=500; int jpeg_q=95;
 
+    // 数值参数的统一出口: 非数字是操作失误, 要给一行原因并以非零退出 —— std::stof 抛出的
+    //   异常逃出 main 会变成 std::terminate (只说 "terminate called after throwing…",
+    //   不说哪个参数)。失败只置标志, 由解析段末尾汇成一次退出 (此时锁已取、设备一个没碰)。
+    bool args_ok=true;
+    auto numf=[&](const std::string& v,const char* flag)->float{
+        size_t p=0; float f=0;
+        try{ f=std::stof(v,&p); }catch(const std::exception&){ p=0; }
+        if(p!=v.size()){ std::cerr<<"❌ "<<flag<<" 不是数字: \""<<v<<"\"\n"; args_ok=false; }
+        return f; };
+    auto numi=[&](const std::string& v,const char* flag)->int{
+        size_t p=0; int x=0;
+        try{ x=std::stoi(v,&p); }catch(const std::exception&){ p=0; }
+        if(p!=v.size()){ std::cerr<<"❌ "<<flag<<" 不是整数: \""<<v<<"\"\n"; args_ok=false; }
+        return x; };
+    auto numd=[&](const std::string& v,const char* flag)->double{
+        size_t p=0; double d=0;
+        try{ d=std::stod(v,&p); }catch(const std::exception&){ p=0; }
+        if(p!=v.size()){ std::cerr<<"❌ "<<flag<<" 不是数字: \""<<v<<"\"\n"; args_ok=false; }
+        return d; };
+
     for (int i=1;i<argc;++i) {
         std::string arg=argv[i];
         if      (arg=="-m"&&i+1<argc) a_m=argv[++i];
@@ -129,10 +149,10 @@ int main(int argc, char* argv[]) {
         else if (arg=="-o"&&i+1<argc) a_o=argv[++i];
         else if (arg=="-a"&&i+1<argc) a_a=argv[++i];
         else if (arg=="-e"&&i+1<argc) { a_e=argv[++i]; have_e=true; }
-        else if (arg=="-F"&&i+1<argc) fire_ms=std::stoi(argv[++i]);
-        else if (arg=="-A"&&i+1<argc) auto_s=std::stod(argv[++i]);
-        else if (arg=="-C"&&i+1<argc) cooldown_ms=std::stoi(argv[++i]);
-        else if (arg=="-q"&&i+1<argc) jpeg_q=std::stoi(argv[++i]);
+        else if (arg=="-F"&&i+1<argc) fire_ms=numi(argv[++i],"-F");
+        else if (arg=="-A"&&i+1<argc) auto_s=numd(argv[++i],"-A");
+        else if (arg=="-C"&&i+1<argc) cooldown_ms=numi(argv[++i],"-C");
+        else if (arg=="-q"&&i+1<argc) jpeg_q=numi(argv[++i],"-q");
         else if (arg=="-r"&&i+1<argc) a_r=argv[++i];
         else if (arg=="-D"&&i+1<argc) a_D=argv[++i];
         else if (arg=="-M"&&i+1<argc) a_M=argv[++i];
@@ -146,7 +166,7 @@ int main(int argc, char* argv[]) {
                 "\n自瞄选项:\n"
                 "  -m <路径>  模型 (.axmodel)  -c <ID> 目标类别 (-1 = 不筛类别)\n"
                 "  -n <数>    模型类数 (0 = 由属性数自解; 未折叠 DFL 头必须给)\n"
-                "  -t <阈值>  置信度     -y <偏移> 部位\n"
+                "  -t <阈值>  置信度 (0–1)     -y <偏移> 部位 % (0–100)\n"
                 "  -d <节点>  采集设备: /dev/videoN (缺省 = 按驱动名解析接收器节点)\n"
                 "  -x <速度>  最大px/s\n"
                 "  -l <L>     初始环路延迟 (标定出的物理环路延迟; 标定回写与运行态生效的就是它)\n"
@@ -189,6 +209,8 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    if (!args_ok) return 1;                       // 参数面先失败 (锁已取, 设备一个都还没碰)
+
     // 实例闸门: 独占资源 (UDC / 采集设备 / NPU 卡) 一次只归一个进程, 故在碰任何
     //   设备之前先取锁 —— 第二个实例今天会撞在 UDC 上报 EBUSY, 而那句话说不出是
     //   谁占着; 取不到锁时这里点出持有者的 pid 与命令行, 退出码非 0。
@@ -200,20 +222,20 @@ int main(int argc, char* argv[]) {
     } else { while(true) { std::cout<<"模型路径: "; std::getline(std::cin,model_path);
              if (std::ifstream(model_path).good()) break; std::cerr<<"文件不存在\n"; } }
 
-    int   cls     =std::stoi(!a_c.empty()?a_c:get_input_with_default("类别ID","0"));
+    int   cls     =numi(!a_c.empty()?a_c:get_input_with_default("类别ID","0"),"-c");
     // 类数只在未折叠 DFL 头上需要 (attrs = 4·reg_max + 类数, reg_max 不可观测);
     //   网格头的类数由属性数自解, 缺省 0 = 自解 (见 io/capture.h 的 open)
-    int   ncls    =std::stoi(!a_n.empty()?a_n:get_input_with_default("模型类数(0=自解)","0"));
-    ncls=std::max(0,ncls);
+    int   ncls    =std::max(0,numi(!a_n.empty()?a_n:get_input_with_default("模型类数(0=自解)","0"),"-n"));
     // 交互默认与启动模板/文档同值 (置信度 0.5; 速度上限 2667 = scripts/game/
     //   template.sh.example 里 MAX_SPEED 的成文推导在部署源 2560×1440 上的落点) —— 只
     //   交互式跑固件的人与经 webui/模板启动的人落在同一个工作点上。
-    float conf    =std::stof(!a_t.empty()?a_t:get_input_with_default("置信度","0.5"));
-    float y_off   =std::stof(!a_y.empty()?a_y:get_input_with_default("Y偏移","65"));
-    float max_spd =std::stof(!a_x.empty()?a_x:get_input_with_default("最大速度","2667"));
-    max_spd=std::clamp(max_spd,100.0f,20000.0f);
+    // 夹取带取 core/state.h 的唯一定义点 (与热参同一份): 命令行给的是初值, 热参给的是
+    //   运行中那一份 —— 手误 -t 5 原样进去就是"永不触发", 而同一个值经 UDP 下发是被夹的。
+    float conf    =std::clamp(numf(!a_t.empty()?a_t:get_input_with_default("置信度","0.5"),"-t"),CONF_THR_MIN,CONF_THR_MAX);
+    float y_off   =std::clamp(numf(!a_y.empty()?a_y:get_input_with_default("Y偏移","65"),"-y"),Y_OFF_PCT_MIN,Y_OFF_PCT_MAX);
+    float max_spd =std::clamp(numf(!a_x.empty()?a_x:get_input_with_default("最大速度","2667"),"-x"),SPD_CAP_MIN,SPD_CAP_MAX);
     const float max_v=max_spd/1000.0f;
-    float init_l=std::clamp(std::stof(a_l.empty()?"60":a_l),L_MIN,L_MAX);
+    float init_l=std::clamp(numf(a_l.empty()?std::to_string((int)L_INIT_MS):a_l,"-l"),L_MIN,L_MAX);
     const std::string persist_path=a_S;
     // 拉枪速度倍率 (核心语义见 core/state.h): 有效灵敏度 = 基线/(倍率/100),
     //   --spd <x>[,<y>] (y 省略 = 与 x 同) / --ads-spd <x>[,<y>]; 缺省 = 100 = 基线。
@@ -269,7 +291,8 @@ int main(int argc, char* argv[]) {
     bool preview=(pv=="y"||pv=="Y");
     if(!preview) unsetenv("DISPLAY");
     jpeg_q=std::clamp(jpeg_q,1,100);
-    float fov_r=std::clamp(std::stof(a_r.empty()?"200":a_r),10.0f,1000.0f);
+    float fov_r=std::clamp(numf(a_r.empty()?std::to_string((int)FOV_RADIUS):a_r,"-r"),
+                           FOV_RADIUS_MIN,FOV_RADIUS_MAX);
 
     // 鼠标接管 (默认开) 与截图源 (默认全开; -e 给出时以该列表为准, 可为空 = 全关)
     bool aim_on=!(a_a=="n"||a_a=="N");

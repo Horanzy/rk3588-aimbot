@@ -255,7 +255,7 @@ static bool standard_request(UsbRawSession& s, const usb_ctrlrequest& c) {
         buf[0] = 0;                                       // bAlternateSetting = 0 (唯一接口设置)
         len = 1;
         break;
-    case USB_REQ_SET_ADDRESS:                             // tegra-xudc 硬件自答; 再收到也零长度收尾
+    case USB_REQ_SET_ADDRESS:                             // 控制器自己应答 (本平台是 dwc3); 若仍收到也零长度收尾
         len = 0;
         break;
     case USB_REQ_SET_INTERFACE:                           // 唯一接口设置, 零长度收尾
@@ -393,8 +393,7 @@ static void set_configuration(UsbRawSession& s, const usb_ctrlrequest& c) {
 // RESET: 中断端点随重枚举失效 → 使能的一端 DISABLE (若使能), OUT 端点走收尾
 //   握手 (在途读必须先返回, 见 out_ep_retire)。SET_CONFIGURATION 到来时再
 //   ENABLE (见 set_configuration) — 端点生命周期与官方 raw-gadget 示例一致:
-//   在未配置状态 enable 的端点, tegra-xudc 不会为其服务 IN token (主机 IN 轮询
-//   永不完成, 数据请求排队无消费)。
+//   未配置状态下 enable 的端点不被服务 (主机 IN 轮询永不完成, 数据请求排队无消费)。
 static void on_reset(UsbRawSession& s) {
     {
         std::lock_guard<std::mutex> lk(s.mtx);
