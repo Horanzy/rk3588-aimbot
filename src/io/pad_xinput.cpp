@@ -220,7 +220,10 @@ void pad_xinput_report(const PadLogical& st, uint8_t out[PAD_XINPUT_REPORT_LEN])
     if (st.btns & PADBTN_DPAD_LEFT)  out[2] |= 1u << 2;
     if (st.btns & PADBTN_DPAD_RIGHT) out[2] |= 1u << 3;
     if (st.btns & PADBTN_START)      out[2] |= 1u << 4;
-    if (st.btns & PADBTN_BACK)       out[2] |= 1u << 5;
+    // Back(View) 位由 BACK 与 TOUCH 共同驱动: 触摸板按下是 PS5 侧语义、XInput 线上
+    //   没有这个位, 而**这颗物理键在 Xbox 布局里本来就是 View/截图键** — p5g 把它
+    //   发成触摸板, XInput 把它发回它天生的 Back(View), 两边都不空按。
+    if (st.btns & (PADBTN_BACK | PADBTN_TOUCH)) out[2] |= 1u << 5;
     if (st.btns & PADBTN_L3)         out[2] |= 1u << 6;
     if (st.btns & PADBTN_R3)         out[2] |= 1u << 7;
     if (st.btns & PADBTN_LB)         out[3] |= 1u << 0;

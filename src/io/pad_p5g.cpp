@@ -388,8 +388,8 @@ void pad_p5g_report(const PadLogical& st, uint8_t out[PAD_P5G_REPORT_LEN]) {
     if (st.btns & PADBTN_GUIDE) out[10] |= 1u << 0;       // home (PS 键)
     // 触摸板按下: 物理手柄没有这个键 — 由别的键代位, 两扇门 (io/pad_input): 摇杆
     //   节点的 BTN_SELECT (Xbox 布局 View/截图小键, 部署手柄的用法) 与兄弟键盘
-    //   接口的 KEY_SYSRQ (实测 G7 Pro 的分享键)。pad 模式 (XInput) 无触摸板位,
-    //   该逻辑位在那边无落点。
+    //   接口的 KEY_SYSRQ (实测 G7 Pro 的分享键)。pad 模式 (XInput) 线上无触摸板
+    //   位, 该逻辑位在 XInput 编码器里落回 Back(View)。
     if (st.btns & PADBTN_TOUCH) out[10] |= 1u << 1;
     // 字节 11 / auth_seq_number / 陀螺 / 加速度计恒 0
     out[30] = 0x1A; out[31] = 0x00;               // 特征字 0x001A (小端, 参考固件初始化即定)
