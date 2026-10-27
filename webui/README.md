@@ -158,6 +158,9 @@ python3 -m venv .venv && .venv/bin/python -m pip install -r requirements.txt
     `_ADS_SPDY`（四个逐轴整数倍率，`100` = 基线、越大越快、有意义带 `5..2000`，热参
     `spdx`/`spdy`/`adsspdx`/`adsspdy`）。倍率的口径按槽不同：hid 槽基线 `1.0 px/count`，
     pad/p5g 槽基线 `满偏屏速 3000 px/s` —— 所以两套的数值不可直接互换，换算才是分槽的理由。
+  - **瞄准**组里的 `SMOOTH`（开火期竖直死区高度 % 检测框高，横向宽 = 一半，0 = 关；热参
+    `smooth`）与 `LEAD`（追踪超前 % 检测框尺寸，两轴，方向取目标绝对屏速，偏移夹在 YOLO
+    框内，0 = 关；热参 `lead`）—— 两者都不改带宽/前馈，只改瞄准点在检测框内的落位。
 - 标定值（环路延迟）**永远以脚本为权威**：每次启动现场解析；`-S` 指向 profile 脚本本身，
   固件标定回写照旧落进脚本 —— SSH 侧与 UI 侧看到同一份标定。三个输出模式各有自己的延迟 VAR
   （`HID_L_EST` / `PAD_L_EST` / `P5G_L_EST`），三格独立、互不覆盖；`-l` 与「运行」页卡片显示的
@@ -257,6 +260,8 @@ python3 -m venv .venv && .venv/bin/python -m pip install -r requirements.txt
 | `adsspdx` / `adsspdy` | ADS 键 (右键 / LT) 按住时的同一对 | `--ads-spd` | 1–10000 |
 | `fov` | FOV 半径 px (像素量: 默认 200 = 1080p 参考下的 150 按部署源 2560×1440 换算) | `-r` | 10–1000 |
 | `padthr` | 手柄触发阈值 % 满量程 (RT/LT 两键共享; 只门控自瞄触发判定, 扳机模拟量仍 1:1 透传) | `-T` | 0–100 |
+| `smooth` | 开火期瞄准框: 竖直死区高度 % 检测框高 (横向宽 = 一半; 框内半增益中心回拉, 框外增益 1; 0 = 关闭) | `--smooth` | 0–100 |
+| `lead` | 追踪超前 % 检测框尺寸 (两轴; 方向 = 目标**绝对**屏速, 最后一步把瞄准点夹在 YOLO 框内; 0 = 关闭) | `--lead` | 0–50 |
 | `k` | 触发键模式 | `-k` | fire / ads / both |
 | `aim` | 鼠标接管 (0=纯透传, 不注入移动; 检测/采集照常) | `-a` | 0 / 1 |
 | `cap_fire` | 开火截图源开关 | `-e` | 0 / 1 |
@@ -264,7 +269,7 @@ python3 -m venv .venv && .venv/bin/python -m pip install -r requirements.txt
 | `cap_auto` | 定时截图源开关 | `-e` | 0 / 1 |
 
 - 每次应用固件打印 `[热参] t=0.55`（UI 从日志流看到回执）；未知 key 忽略；启动时打印
-  `✅ 热参数通道: 127.0.0.1:47700 (t/y/x/fov/padthr/spdx/spdy/adsspdx/adsspdy/k/aim/padcalib/cap_*)` ——
+  `✅ 热参数通道: 127.0.0.1:47700 (t/y/x/fov/padthr/smooth/lead/spdx/spdy/adsspdx/adsspdy/k/aim/padcalib/cap_*)` ——
   WebUI 以该行为准判断固件能力，旧二进制（无此行/二进制探测失败）热参 UI 置灰，**不盲发 UDP**。
   倍率热参只有一套：保存时按**运行中实例的模式**取槽（实例跑 pad 时改 pad 槽 → 发 `spdx`；
   改 hid/p5g 槽 → 只是脚本改动，下次【启动】生效）；改 `output_mode`（冷参数）时本次不外发。

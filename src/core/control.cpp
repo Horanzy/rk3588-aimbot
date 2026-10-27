@@ -95,13 +95,14 @@ void law_tick(const LawIn& in, LawOut& out) {
             float px,py,vx,vy,le,cs;bool valid;
             std::chrono::steady_clock::time_point tp;
             float ax_e,ay_e,last_dt,last_alpha,last_beta;
+            float bw,bh;
             { std::lock_guard<std::mutex> lk(g_target.mtx);
               px=g_target.px;py=g_target.py;vx=g_target.vx;vy=g_target.vy;
               le=g_target.l_est_ms;cs=g_target.cs;
               valid=g_target.valid;tp=g_target.t_pub;
               ax_e=g_target.ax_e;ay_e=g_target.ay_e;
               last_dt=g_target.last_dt;last_alpha=g_target.last_alpha;
-              last_beta=g_target.last_beta; }
+              last_beta=g_target.last_beta; bw=g_target.bw;bh=g_target.bh; }
             double age=elapsed_ms(now,tp);
             if (valid&&age<TARGET_STALE_MS) {
                 const float max_v=g_max_v.load(), fov_r=g_fov_radius.load();
@@ -128,7 +129,32 @@ void law_tick(const LawIn& in, LawOut& out) {
                 float W=(float)age+Lc;
                 float ex=px+vffx*W+0.5f*ax_e*W*W-ifx;
                 float ey=py+vffy*W+0.5f*ay_e*W*W-ify;
-                float r=std::hypot(ex,ey);
+                // 追踪超前: 参考点 = 目标 + 超前偏移 (沿目标**绝对**屏速 vx/vy 方向,
+                //   即估计器扣掉自身在途位移后的目标速度), 误差输入取"到参考点"的
+                //   误差 e_ref = e_target + lead —— 律对 e_ref 归零 → 准星落在目标
+                //   前方 lead px (不是后方)。**最后一步**才夹框: 瞄准点的绝对位置
+                //   越出 YOLO 框就钉在框边 (横向瞄准点在框的 x 中心, 纵向在 y_off%)。
+                //   lead=0 → 中心 (关闭)。
+                const int lead=g_lead.load();
+                if (lead>0 && bw>0.0f) {
+                    ex += lead_clamped_axis_px(lead,bw,vx,0.5f);
+                    // -y 是从脚算的高度 (0=脚 100=头); 屏幕 y 向下, 故从框顶算是 1-y/100
+                    const float yft=1.0f-std::clamp(g_y_off_pct.load()*0.01f,0.0f,1.0f);
+                    ey += lead_clamped_axis_px(lead,bh,vy,yft);
+                }
+                // 开火期瞄准框 (软死区): 只在扳机按住时生效。smooth = 竖直死区
+                //   高度占检测框高度的百分比 (横向宽 = 一半), 框半宽/半高由本帧
+                //   检测框导出; 箱内半增益中心回拉, 箱外增益仍 1 (大误差/拉枪原样)。
+                const int smooth=g_smooth.load();
+                float efx=ex, efy=ey;
+                if (left && smooth>0) {
+                    const float hy=smooth_half_h(smooth,bh);
+                    const float hx=smooth_half_w(smooth,bw);
+                    efx=smooth_axis(ex,hx,BOX_CENTER_GAIN);
+                    efy=smooth_axis(ey,hy,BOX_CENTER_GAIN);
+                }
+                const float r_raw=std::hypot(ex,ey);   // FOV 边界按真实预测误差
+                float r=std::hypot(efx,efy);
                 float L=std::max(1.0f,le);
                 float wn=(90.0f-FF_PM_DEG)*3.14159265358979f/180.0f/L;
                 float kp=2.0f*FF_ZETA*wn;
@@ -136,14 +162,14 @@ void law_tick(const LawIn& in, LawOut& out) {
                 float gate=FF_I_GATE/(FF_I_GATE+r);
                 float i_lim_x=FF_I_FRAC*max_vx/std::max(ki,1e-9f);
                 float i_lim_y=FF_I_FRAC*max_vy/std::max(ki,1e-9f);
-                float vx_u=kp*ex+ki*int_x;
-                float vy_u=kp*ey+ki*int_y;
-                if (ex*ex+ey*ey>fov_r*fov_r) { int_x=int_y=0; }
+                float vx_u=kp*efx+ki*int_x;
+                float vy_u=kp*efy+ki*int_y;
+                if (r_raw>fov_r) { int_x=int_y=0; }
                 else {
-                    bool wx=(vx_u>max_vx&&ex>0)||(vx_u<-max_vx&&ex<0);
-                    bool wy=(vy_u>max_vy&&ey>0)||(vy_u<-max_vy&&ey<0);
-                    if(!wx)int_x=std::clamp(int_x+ex*TICK_MS*gate,-i_lim_x,i_lim_x);
-                    if(!wy)int_y=std::clamp(int_y+ey*TICK_MS*gate,-i_lim_y,i_lim_y);
+                    bool wx=(vx_u>max_vx&&efx>0)||(vx_u<-max_vx&&efx<0);
+                    bool wy=(vy_u>max_vy&&efy>0)||(vy_u<-max_vy&&efy<0);
+                    if(!wx)int_x=std::clamp(int_x+efx*TICK_MS*gate,-i_lim_x,i_lim_x);
+                    if(!wy)int_y=std::clamp(int_y+efy*TICK_MS*gate,-i_lim_y,i_lim_y);
                 }
                 // FF 门控 = 信任度插值: 信任满格 (稳态追击) → 无门控全力
                 // 前馈 (sharp); CUSUM 告警 (模型破缺, 该轴 v̂ 已归零重拉)

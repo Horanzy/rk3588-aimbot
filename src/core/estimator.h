@@ -27,9 +27,11 @@ struct EstimatorState {
 };
 
 // 推进一帧: dt 归一滤波更新 (含 CUSUM/â) 与 g_target 发布; 返回本帧实测 dt (ms,
-// 钳制到 1–100)。found/best_dx/best_dy 为本帧目标筛选结果; 自身运动的三处换算
-// (预测减法/清洗创新/自身活动门) 取 **本帧一次快照** 的账本来源与逐轴比例
-// (io/pad_output.h 的 own_motion_ledger/own_motion_scale, 随输出模式路由)。
+// 钳制到 1–100)。found/best_dx/best_dy 为本帧目标筛选结果; box_w/box_h 是同一
+// 检测框的宽/高 (px), 随目标一起发布 (控制拍按 smooth% 导开火期瞄准框);
+// 自身运动的三处换算 (预测减法/清洗创新/自身活动门) 取 **本帧一次快照** 的账本
+// 来源与逐轴比例 (io/pad_output.h 的 own_motion_ledger/own_motion_scale, 随输出
+// 模式路由)。
 float estimator_step(EstimatorState& st, std::chrono::steady_clock::time_point now,
                      bool found, float best_dx, float best_dy,
-                     float l_est, float max_v);
+                     float box_w, float box_h, float l_est, float max_v);

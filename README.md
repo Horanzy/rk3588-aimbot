@@ -72,6 +72,17 @@ inside the law nothing is hand-tuned; the speed scale is the one input the opera
 own input sensitivity, which the firmware cannot observe (its correct value puts the loop at its design
 point, and the law's proven mismatch envelope is ±30%). Adapts to PC/PS5 and 60/120fps.
 
+Two aim-policy values sit on top of the law and only shape **where within the detected body** the crosshair
+is held — the lock's far field (large errors, flicks, the delay-mismatch band) is untouched. The
+**fire-time aim box** (`--smooth`, a soft deadband whose vertical height is a % of the detection bbox,
+horizontal width = half) stops the law from treating each bullet's recoil kick as an independent step: inside
+the box the error is pulled to the centre at half gain (a tendency, never a lazy dead zone), outside the gain
+is 1. The **tracking lead** (`--lead`, % of the bbox) shifts the aim point ahead of a moving target along its
+**absolute** screen velocity — the estimator's own-motion-subtracted target velocity, never the crosshair's
+relative motion, since a bullet does not turn because the crosshair did — and the last step pins the aim
+point's absolute position inside the YOLO box (an overrun lands on the edge; no aggressive ballistic lead).
+Both are hot parameters and per-game script values.
+
 **A pixel is not an angle**, so the two operator-supplied quantities and the ratios are tied to the source
 resolution. Going to a source with `R×` the pixels per degree (for the same field of view, the width
 ratio): `MAX_SPEED` (px/s) and `FOV_RADIUS` (px) scale **up** by `R`, and the pull-speed ratios scale
@@ -136,6 +147,8 @@ reads the guard's effective value, not its literal text.
 | `CONF_THRESH` / `Y_OFFSET` / `CAM_DEV` | `-t` / `-y` / `-d` | confidence, aim height offset, capture device (`/dev/videoN`; empty = resolve the receiver by driver name) |
 | `MAX_SPEED` | `-x` | crosshair speed cap px/s (derivation in the template; a pixel quantity, shipped as 2667 = the 1080p reference's 2000 carried to the 1440p deployment source) |
 | `AIM_KEY` / `AIM_ENABLED` / `FOV_R` / `PREVIEW` | `-k` / `-a` / `-r` / `-v` | trigger key, mouse takeover, FOV radius (also a pixel quantity: shipped as 200 px = the reference's 150 px at 1440p), preview |
+| `SMOOTH` | `--smooth` | fire-time aim box (soft deadband): the vertical deadband height in % of the detection bbox height, horizontal width = half; inside the box the aim is pulled to the centre at half gain, outside the gain is 1 (flicks/large errors untouched); `0` = off (hot param `smooth`) |
+| `LEAD` | `--lead` | tracking lead in % of the detection box, both axes, along the target's **absolute** screen velocity (the estimator's own-motion-subtracted velocity, not the crosshair's relative motion); the offset is clamped inside the YOLO box; `0` = off (hot param `lead`) |
 | `CAPTURE` `CAP_FIRE` `CAP_DET` `CAP_AUTO` `OUT_DIR` `FIRE_MS` `AUTO_S` `COOLDOWN_MS` `JPEG_Q` | `-o` `-e` `-F` `-A` `-C` `-q` | training-data collection |
 
 **Each output mode owns a slot of five values** (one delay + four ratios), and switching `OUTPUT_MODE`
@@ -155,11 +168,12 @@ all consume the same per-axis effective gain, so they cannot desynchronize.
 
 The binary opens a **localhost-only** UDP channel (`127.0.0.1:47700`, datagrams of
 `key=value;key=value`) so a running instance can be retuned without a restart. Whitelisted keys — `t` `y`
-`x` `fov` `padthr` `spdx` `spdy` `adsspdx` `adsspdy` `k` `aim` `cap_fire` `cap_det` `cap_auto` — are
-clamped by the firmware as well, so the sender is never trusted; `padcalib=1` requests one calibration
-round (consumed once; a request arriving mid-run is logged and dropped, never re-entrant). Structural
-constants (PM/ζ/FF gain/CUSUM thresholds) are compile-time and deliberately absent from the wire. Every
-applied key is echoed as a `[热参] …` log line; the full table with clamps is in `webui/README.md`.
+`x` `fov` `padthr` `smooth` `lead` `spdx` `spdy` `adsspdx` `adsspdy` `k` `aim` `cap_fire` `cap_det`
+`cap_auto` — are clamped by the firmware as well, so the sender is never trusted; `padcalib=1` requests one
+calibration round (consumed once; a request arriving mid-run is logged and dropped, never re-entrant).
+Structural constants (PM/ζ/FF gain/CUSUM thresholds) are compile-time and deliberately absent from the
+wire. Every applied key is echoed as a `[热参] …` log line; the full table with clamps is in
+`webui/README.md`.
 
 ## WebUI
 

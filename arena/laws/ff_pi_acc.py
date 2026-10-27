@@ -70,6 +70,41 @@ CUSUM 速度归零重拉 + 结构性加速度偏差补偿 (ff_pi 系现役律)�
     123.62。holdout (seeds 4,5,6): matched 111.96, accel 4.36px, OVERALL
     139.37。
 
+开火期瞄准框 (软死区; 固件门 = 开火键, arena 由实验直接开; 关 = 瞄准点):
+    后坐力在屏幕上是每发一个阶跃 (瞄准点被推下 K px, 间隔 T)。点瞄准会把每一发
+    当成独立阶跃去收敛, 观感是一串 pull 脉冲 (非人力输出)。开火期把瞄准目标从
+    一点换成一个以瞄准点为中心的框: 误差按
+        e' = e - (1-c)·h·tanh(e/h)
+    整形 — 箱内增益 c (中心回拉趋势, 永不摆烂), 箱外增益 → 1 (大误差/拉枪/失配
+    完全不受影响 — 锁的远场原样)。框的尺寸由操作员给的**竖直死区高度百分比**
+    smooth 决定 (占检测框高度): 高 = smooth%, 宽 = smooth/2%, 即
+        hy = smooth·bbox_h/200,  hx = smooth·bbox_w/400
+    smooth=0 → h=0 → e'=e (关闭)。中心增益 c 固定 0.5 (箱内半增益回拉, 实测膝点;
+    箱外 1 — "锁"的远场不是可调项)。实测 (arena/laws/_wip_burst.py, 120fps L=50,
+    smooth=25 即 25% 高的竖直窗 (50–75% 的口径)):
+      600rpm K=12: rmse 3.15→3.15, 击发前 |e| 7.0→7.0, jerk 0.022→0.013
+      400rpm K=20: rmse 9.13→7.45, e_pp 25→22, jerk 0.029→0.017
+      900rpm K=8:  rmse 2.21→2.43, jerk 0.017→0.010 (低后座档的容差代价)
+    失配/丢帧: L30 的 rmse 8.41→4.17 (最大改善); L70 2.75→2.97 / 丢帧 3.37→3.46
+    (这两档 +8%/+3%, 但击发前误差 6.0→5.1 / 7.0→6.0 同步变小); s±30%/60fps/横移不升。
+    开火中 80px 阶跃: first 172→188ms, settle 302→432ms (末端 (1-c)h 以 c 增益
+    缓收, 是框的语义), 过冲 3.2→4.1px (仍在箱内)。常开 (非开火期也生效) 会把
+    标准四组拖到 OVERALL 149.95 (matched 138.65 vs 114.66) — 故只门控在开火期。
+
+追踪超前 (bullet lead, 两轴):
+    子弹有飞行时间, 目标横移时瞄准点应沿运动方向前移, 否则弹着点在目标身后。前移量
+        lead = lead% · bbox_dim · clamp(v̂_abs / V_SAT, -1, 1)
+    v̂ 是估计器扣掉自身在途位移后的目标**绝对**速度 (不是准星相对运动: 子弹不会因为
+    准星移动而拐弯); V_SAT = 0.25 px/ms (本库行为模型的横移带 0.12–0.4 的中点),
+    所以静止目标 0、典型横移拿满 lead%、慢目标按比例。偏移逐轴夹在 YOLO 框内
+    (横向中心 ±50%; 纵向余量从瞄准点 y_off% 到上下边), lead=0 → 中心。
+    实测 (纯横移 0.25px/ms 向右, bbox 100×220): 稳态 mean_ex = −0.42 (lead=0) /
+    −3.40 (lead=3) / −5.38 (lead=5) / −10.36 (lead=10) — 准星在目标**前方** (ex<0),
+    偏移 ≈ lead。静止目标的速度估计 σ=0.0022px/ms → 5% 超前的偏移噪声 ≈0.04px;
+    bbox 每帧 ±5px 抖动下指令速度 σ 不升 (−0.0013px/ms)。开火期竖直 v̂ 含后坐力的
+    相机位移 (600rpm/K12 时 ≈0.12px/ms), 所以竖直超前带一个向下偏置 (lead=5 时击发
+    前误差 7→12px, 仍在箱内) — 那是"瞄准点低几像素", 不是失锁。
+
 debug() 字段语义 (px / px/ms / px/ms² / σ):
   ex, ey           Smith 汇装误差 ê (补偿后, 驱动 P/I)
   fvx, fvy         α-β 速度估计 v̂ (未修正)
@@ -127,6 +162,33 @@ class FFPiAccLaw(Law):
     # 依据见模块 docstring "显著性地板" — 盖过设计失配带下相关 dither
     # 噪声驱动的均值游走 (3σ白×相关膨胀≈8-10), 取全档逐位持平的最小整档。
     ACC_SNR = 10.0
+    # 开火期瞄准框的中心增益 (箱内): 0.5 = 箱内半增益回拉 (实测膝点; 箱外恒 1)。
+    #   强度是框的尺寸 (smooth = 竖直死区高度 %), 不是 c — "锁"的远场不可调。
+    BOX_CENTER_GAIN = 0.5
+    # 追踪超前的速度饱和 (px/ms): 横移带 0.12–0.4 的中点 (fps.py 的 strafe 量级)
+    LEAD_V_SAT = 0.25
+
+    @classmethod
+    def lead_offset(cls, pct: float, bbox_dim: float, v_abs: float) -> float:
+        if pct <= 0 or bbox_dim <= 0.0:
+            return 0.0
+        return pct * 0.01 * bbox_dim * max(-1.0, min(1.0, v_abs / cls.LEAD_V_SAT))
+
+    @classmethod
+    def lead_clamped(cls, pct: float, bbox_dim: float, v_abs: float,
+                     aim_frac: float) -> float:
+        """最后一步: 先正常算瞄准点的绝对位置, 越出 [0, bbox_dim] 就钉在框边,
+        返回相对瞄准点的偏移 (永远不越 YOLO 框)。"""
+        aim = aim_frac * bbox_dim
+        pos = max(0.0, min(bbox_dim, aim + cls.lead_offset(pct, bbox_dim, v_abs)))
+        return pos - aim
+
+    @staticmethod
+    def soft_axis(e: float, h: float, c: float) -> float:
+        """单轴软死区: e' = e - (1-c)·h·tanh(e/h); h=0 或 c>=1 时恒等。"""
+        if h <= 0.0 or c >= 1.0:
+            return e
+        return e - (1.0 - c) * h * math.tanh(e / h)
 
     def __init__(self, **kw):
         # 设计点 (失配带测试选定, 非手感): PM=50 全带最快; β0=0.03 带边缘余量
@@ -141,6 +203,12 @@ class FFPiAccLaw(Law):
         self.pm_deg = kw.pop("pm_deg")
         self.beta0 = kw.pop("beta0")
         self._max_v = kw.pop("max_v", 0.0)   # 0 = 取 cfg.max_v (硬件速度上限)
+        self.smooth = kw.pop("smooth", 0)     # 竖直死区高度 % (0=关闭)
+        self.box_w = kw.pop("box_w", 0.0)     # 检测框宽度 px
+        self.box_h = kw.pop("box_h", 0.0)     # 检测框高度 px
+        self.lead = kw.pop("lead", 0)         # 追踪超前 % (0=关闭)
+        self.aim_y_frac = kw.pop("aim_y_frac", 0.5)   # 瞄准点从**框顶**算的竖直比例
+                                                       #   (固件 = 1 - y_off/100: -y 65 → 0.35)
         self._dbg = {}
 
     def reset(self, cfg: LawConfig):
@@ -379,22 +447,37 @@ class FFPiAccLaw(Law):
             ey = (self.fy + vff_y * w_win
                   + 0.5 * self.ay_e * w_win * w_win
                   - cfg.s * (cn[1] - cp[1]))
-            r = math.hypot(ex, ey)
+            # 追踪超前: 参考点 = 目标 + 超前偏移 (沿绝对屏速方向), 误差输入是
+            #   "到参考点"的误差 e_ref = e_target + lead (律对 e_ref 归零 → 准星落在
+            #   目标前方 lead px, 不是后方)。**最后一步**夹框: 瞄准点的绝对位置
+            #   越出 YOLO 框就钉在框边 (横向瞄准点在框的 x 中心, 纵向在 y_off%)。
+            if self.lead > 0 and self.box_w > 0.0:
+                ex += self.lead_clamped(self.lead, self.box_w, self.fvx, 0.5)
+                yf = max(0.0, min(1.0, self.aim_y_frac))
+                ey += self.lead_clamped(self.lead, self.box_h, self.fvy, yf)
+            r_raw = math.hypot(ex, ey)
+            # 开火期瞄准框 (竖直高 smooth%, 横向宽 smooth/2%): 只整形喂给 P/I 与
+            #   I 门控的误差; FOV 边界仍用原始误差
+            hy = self.smooth * self.box_h / 200.0
+            hx = self.smooth * self.box_w / 400.0
+            efx = self.soft_axis(ex, hx, self.BOX_CENTER_GAIN)
+            efy = self.soft_axis(ey, hy, self.BOX_CENTER_GAIN)
+            r = math.hypot(efx, efy)
             gate = self.i_gate / (self.i_gate + r) if self.i_gate > 0 else 1.0
 
             i_lim = self.i_frac * self.max_v / max(self.ki, 1e-9)
-            vx_u = self.kp * ex + self.ki * self.int_x
-            vy_u = self.kp * ey + self.ki * self.int_y
+            vx_u = self.kp * efx + self.ki * self.int_x
+            vy_u = self.kp * efy + self.ki * self.int_y
 
-            if ex * ex + ey * ey > cfg.fov_radius * cfg.fov_radius:
+            if r_raw > cfg.fov_radius:
                 self.int_x = self.int_y = 0.0
             else:
-                wx = (vx_u > self.max_v and ex > 0) or (vx_u < -self.max_v and ex < 0)
-                wy = (vy_u > self.max_v and ey > 0) or (vy_u < -self.max_v and ey < 0)
+                wx = (vx_u > self.max_v and efx > 0) or (vx_u < -self.max_v and efx < 0)
+                wy = (vy_u > self.max_v and efy > 0) or (vy_u < -self.max_v and efy < 0)
                 if not wx:
-                    self.int_x = max(-i_lim, min(i_lim, self.int_x + ex * cfg.h * gate))
+                    self.int_x = max(-i_lim, min(i_lim, self.int_x + efx * cfg.h * gate))
                 if not wy:
-                    self.int_y = max(-i_lim, min(i_lim, self.int_y + ey * cfg.h * gate))
+                    self.int_y = max(-i_lim, min(i_lim, self.int_y + efy * cfg.h * gate))
 
             # FF 门控 = 信任度插值 (信任满格无门控, 告警回保守距离门控)
             frame_dt = cfg.frame_dt if cfg.frame_dt > 0 else self.DT0
@@ -418,11 +501,12 @@ class FFPiAccLaw(Law):
             gate = 0.0
             ff_eff = 0.0
             ex = ey = 0.0
+            efx = efy = 0.0
             w_state = self._w_state
 
         self.ch.add(t, cx, cy)
         self._dbg = {
-            "ex": ex, "ey": ey, "r": r,
+            "ex": ex, "ey": ey, "efx": efx, "efy": efy, "r": r,
             "fvx": self.fvx, "fvy": self.fvy,
             "ax_e": self.ax_e, "ay_e": self.ay_e,
             "ybar_x": self.ybar_x, "ybar_y": self.ybar_y,

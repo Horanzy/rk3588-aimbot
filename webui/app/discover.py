@@ -67,6 +67,11 @@ PARAM_DEFS = {
     "aim_key":         dict(kind="enum",  choices=("fire", "ads", "both"), default="both"),
     "aim_enabled":     dict(kind="bool",  default=True),
     "fov":             dict(kind="float", lo=10.0, hi=1000.0, default=200.0),
+    # 开火期瞄准框: 竖直死区高度 % (横向宽 = 一半), 0 = 关闭。追踪超前: 瞄准点沿
+    #   目标绝对屏速前移的百分比 (两轴, 夹在 YOLO 框内), 0 = 关闭。两者的夹取带与
+    #   固件 core/state.h 的 smooth_clamp/lead_clamp 同一份。
+    "smooth":          dict(kind="int",   lo=0, hi=100, default=25),
+    "lead":            dict(kind="int",   lo=0, hi=50, default=5),
     "preview":         dict(kind="bool",  default=False),
     "capture_enabled": dict(kind="bool",  default=False),
     "cap_fire":        dict(kind="bool",  default=True),
@@ -100,7 +105,8 @@ for _m in OUTPUT_MODES:
 #   改的是下次启动的取值, 不外发热参。
 HOT_WIRE_KEYS = {"conf": "t", "y_offset": "y", "max_speed": "x", "fov": "fov", "aim_key": "k",
                  "aim_enabled": "aim", "cap_fire": "cap_fire", "cap_det": "cap_det",
-                 "cap_auto": "cap_auto", "pad_trig_thr": "padthr"}
+                 "cap_auto": "cap_auto", "pad_trig_thr": "padthr",
+                 "smooth": "smooth", "lead": "lead"}
 
 
 def mode_spd_keys(mode) -> dict:
@@ -125,6 +131,7 @@ SCRIPT_VARS = {
     "CAP_AUTO": "cap_auto", "OUT_DIR": "capture_dir", "FIRE_MS": "fire_ms",
     "AUTO_S": "auto_s", "COOLDOWN_MS": "cooldown_ms", "JPEG_Q": "jpeg_q",
     "MODEL_PATH": "model", "FOV_R": "fov",
+    "SMOOTH": "smooth", "LEAD": "lead",
 }
 # 三套输出的 5 个值各自的 VAR 名: <模式>_L_EST (固件标定回写目标) + <模式>_SPDX/SPDY/
 #   ADS_SPDX/ADS_SPDY; 模式前缀是必需的身份 —— 同一个数在两套口径下含义不同, 所以每个值
