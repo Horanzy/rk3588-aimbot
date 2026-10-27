@@ -68,9 +68,10 @@ def ok(cond, msg):
 class VPad:
     """uinput 虚拟手柄 (xpad 风格轴分配)"""
 
-    # 按钮 → 逻辑位 (与 src/io/pad_input.h 的 PadBtn 位表一致)
+    # 按钮 → 逻辑位 (与 src/io/pad_input.h 的 PadBtn 位表一致; BTN_SELECT 例外:
+    #   它代位触摸板按下 (0x8000), 不再落 BACK — PS5 侧语义, 见 io/pad_input.cpp)
     BITS = {BTN_A: 0x0001, BTN_B: 0x0002, BTN_X: 0x0004, BTN_Y: 0x0008,
-            BTN_TL: 0x0010, BTN_TR: 0x0020, BTN_SELECT: 0x0040,
+            BTN_TL: 0x0010, BTN_TR: 0x0020, BTN_SELECT: 0x8000,
             BTN_START: 0x0080, BTN_MODE: 0x0100,
             BTN_THUMBL: 0x0200, BTN_THUMBR: 0x0400}
 
@@ -244,9 +245,9 @@ def main():
         ok(p is not None and p["btns"] == 0x0000, "A 松开 → btns=0x0000")
         for b in (BTN_TL, BTN_TR, BTN_SELECT, BTN_MODE):
             pad.key(b, True)
-        want = 0x0010 | 0x0020 | 0x0040 | 0x0100
+        want = 0x0010 | 0x0020 | 0x8000 | 0x0100
         p = d.expect("btns", want)
-        ok(p is not None and p["btns"] == want, "LB+RB+back+guide → btns=0x%04x" % want)
+        ok(p is not None and p["btns"] == want, "LB+RB+touch+guide → btns=0x%04x" % want)
         for b in (BTN_TL, BTN_TR, BTN_SELECT, BTN_MODE):
             pad.key(b, False)
         settle(d, 0.15)

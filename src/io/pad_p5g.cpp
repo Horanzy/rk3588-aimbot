@@ -386,9 +386,10 @@ void pad_p5g_report(const PadLogical& st, uint8_t out[PAD_P5G_REPORT_LEN]) {
     if (st.btns & PADBTN_L3)    out[9] |= 1u << 6;
     if (st.btns & PADBTN_R3)    out[9] |= 1u << 7;
     if (st.btns & PADBTN_GUIDE) out[10] |= 1u << 0;       // home (PS 键)
-    // 触摸板按下: 物理手柄没有这个键 — 由"分享/上传"一类键代位 (io/pad_input 的
-    //   兄弟节点读取: 实测 G7 Pro 的分享键报在键盘接口的 KEY_SYSRQ)。pad 模式
-    //   (XInput) 无触摸板位, 该逻辑位在那边无落点。
+    // 触摸板按下: 物理手柄没有这个键 — 由别的键代位, 两扇门 (io/pad_input): 摇杆
+    //   节点的 BTN_SELECT (Xbox 布局 View/截图小键, 部署手柄的用法) 与兄弟键盘
+    //   接口的 KEY_SYSRQ (实测 G7 Pro 的分享键)。pad 模式 (XInput) 线上无触摸板
+    //   位, 该逻辑位在 XInput 编码器里落回 Back(View)。
     if (st.btns & PADBTN_TOUCH) out[10] |= 1u << 1;
     // 字节 11 / auth_seq_number / 陀螺 / 加速度计恒 0
     out[30] = 0x1A; out[31] = 0x00;               // 特征字 0x001A (小端, 参考固件初始化即定)
@@ -670,9 +671,13 @@ namespace {
 UsbRawSession g_usb;
 std::thread g_loop_th;
 
-// 后端循环 (拍率 = DEFAULT_FREQ): ① PS5 配置下降沿 → 认证回合与流水线复位 →
-//   ② 加密狗在位管理 (1s 周期重扫) → ③ 认证状态机一拍 → ④ 读加密狗签名回包 →
-//   ⑤ 合并态 → 变化驱动提交加密狗。发往 PS5 的字节只来自 ④。
+// 后端循环 (无待签报告时拍率 = DEFAULT_FREQ; 签名在途时由加密狗的往返定拍):
+//   ① PS5 配置下降沿 → 认证回合与流水线复位 → ② 加密狗在位管理 (1s 周期重扫)
+//   → ③ 认证状态机一拍 → ④ 读加密狗签名回包 → ⑤ 合并态 → 变化驱动提交加密狗。
+//   发往 PS5 的字节只来自 ④。④ 在待签报告在途时阻塞等回包: 加密狗的单份签名
+//   节拍是实测 2.0ms, 若仍按 1ms 拍轮询, 回包落在拍间就白等最多一拍, 有效报告率
+//   被拍相位压到 ~323Hz; 同拍读出签名并提交下一份, 报告率才等于狗的节拍
+//   (~500Hz) 而不是拍的相位。
 void p5g_loop(UsbRawSession* s) {
     P5gDongle dg;
     P5gFlow flow;
@@ -686,7 +691,11 @@ void p5g_loop(UsbRawSession* s) {
 
     while (!s->stopping) {
         next += period;
-        std::this_thread::sleep_until(next);
+        // 落后于 1ms 拍时不补睡 (签名在途的那几拍由狗的往返定拍); 不把欠账
+        //   累积成连续空转 — 无待签报告时仍按 1ms 一拍。
+        const auto tick_now = std::chrono::steady_clock::now();
+        if (next < tick_now) next = tick_now;
+        else std::this_thread::sleep_until(next);
         const uint64_t now = p5g_now_us();
 
         // ① PS5 配置下降沿 (重枚举/挂起): 认证回合与流水线复位 — 重连后的握手
@@ -723,7 +732,11 @@ void p5g_loop(UsbRawSession* s) {
         //    发往 PS5 的字节永远是加密狗返回的字节
         if (dg.fd >= 0) {
             struct pollfd pfd{}; pfd.fd = dg.fd; pfd.events = POLLIN;
-            if (poll(&pfd, 1, 0) > 0) {
+            // 待签报告在途: 阻塞到回包 (3ms = 狗实测 2.0ms 单份往返 + 一拍余量),
+            //   同拍读出签名并在 ⑤ 提交下一份; 无待签报告时非阻塞 — 空闲仍是
+            //   1ms 拍 (签名在途时报告率才由狗的节拍决定, 不被拍相位压低)。
+            const int wait_ms = flow.pending ? 3 : 0;
+            if (poll(&pfd, 1, wait_ms) > 0) {
                 uint8_t inr[64];
                 const ssize_t n = read(dg.fd, inr, sizeof(inr));
                 if (n == (ssize_t)sizeof(inr)) {

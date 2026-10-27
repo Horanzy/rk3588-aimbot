@@ -423,8 +423,9 @@ int main() {
         CHECK(r[3] == 0x07 + 0x40 + 0x80, "LB+RB+Guide+X+Y → byte3 = 0xC7 (保留 bit3 恒 0)");
         d.btns = PADBTN_TOUCH;
         pad_xinput_report(d, r);
-        CHECK(r[2] == 0x00 && r[3] == 0x00,
-              "触摸板位 (PS5 语义, 由分享键代位) 在上线报文里无落点 → 全零 (仅 p5g 有意义)");
+        CHECK(r[2] == 0x20 && r[3] == 0x00,
+              "触摸板位 (PS5 语义, 由 View/截图键代位) 在 XInput 线上落回 Back(View) "
+              "= byte2 bit5 (这颗物理键在 Xbox 布局里的天生含义)");
 
         PadLogical t; t.lt = 255; t.rt = 137;
         pad_xinput_report(t, r);

@@ -60,7 +60,10 @@ int pad_key_bit(uint16_t code) {
         case BTN_Y:       return PADBTN_Y;      // BTN_WEST
         case BTN_TL:      return PADBTN_LB;
         case BTN_TR:      return PADBTN_RB;
-        case BTN_SELECT:  return PADBTN_BACK;
+        // BTN_SELECT (Xbox 布局的 View/截图小键): 触摸板按下是 PS5 侧语义, 物理手柄
+        //   没有这个键, 部署手柄把这个键当触摸板用 (摇杆节点直报)。PS5 的
+        //   Create(录制) 位因此空置 — 那个语义与触摸板在同一颗物理键上, 二者取一。
+        case BTN_SELECT:  return PADBTN_TOUCH;
         case BTN_START:   return PADBTN_START;
         case BTN_MODE:    return PADBTN_GUIDE;
         case BTN_THUMBL:  return PADBTN_L3;
