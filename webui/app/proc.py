@@ -87,7 +87,11 @@ def build_argv(root: Path, params: dict, script_path: Path) -> list:
 
     采集侧只有一项: -d <节点> (空 = 固件按驱动名解析板载 HDMI 接收器节点, 与脚本里
     CAM_DEV 的缺省同一个语义); 帧率不是参数 (由信号决定), 类数 -n 只在模型的检测头是
-    未折叠 DFL 头时需要, 0 = 由输出属性数自解。"""
+    未折叠 DFL 头时需要, 0 = 由输出属性数自解。
+
+    瞄准策略是两个全局值 (不按输出模式分槽): 开火期瞄准框 --smooth 与追踪超前
+    --lead, 都随命令行显式给出 (0 = 关闭, 夹取带见固件 core/state.h); 脚本缺行时取
+    PARAM_DEFS 的默认值, 参数页显示的值与运行值因此是同一个数。"""
     mode = str(params.get("output_mode") or "hid")
     if mode not in discover.OUTPUT_MODES:
         mode = "hid"
@@ -114,6 +118,9 @@ def build_argv(root: Path, params: dict, script_path: Path) -> list:
             "-k", str(params.get("aim_key", dflt("aim_key"))),
             "-a", "y" if params.get("aim_enabled", True) else "n",
             "-r", fmt_num(params.get("fov", dflt("fov"))),
+            # 瞄准策略 (全局值, 0 = 关闭): 开火期死区高度 % / 追踪超前 %
+            "--smooth", fmt_num(params.get("smooth", dflt("smooth"))),
+            "--lead", fmt_num(params.get("lead", dflt("lead"))),
             "-v", "y" if params.get("preview") else "n"]
     # 本模式那一槽的延迟 = 本模式那条标定 VAR (hid → HID_L_EST, pad → PAD_L_EST,
     #   p5g → P5G_L_EST); 缺行缺值时省略 -l, 固件按默认兜底
