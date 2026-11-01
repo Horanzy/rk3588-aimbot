@@ -106,13 +106,22 @@ cfg = {
 #
 # 这些算子都是逐元素/拼接/变形一类, 没有 MAC, 16 位几乎不增加延迟; 关掉它可设 NO_LAST_U16=1
 # 做 A/B。
-ops = [n.name for n in g.node if any(o in {x.name for x in g.output} for o in n.output)]
-ops = [o for o in ops if o]
+# cut_head.py 切过的图会把"坐标与分数刚合并"那个算子的名字留在 metadata 里 —— 那张张量是
+#   名单是"框与分数两条分支的生产者"。只提"产生输出的算子"在这类图上不够: 输出那次 Concat
+#   是搬运算子, 它的输入若不是计算算子的输出, 工具链不往上升精度, 分数就会被坐标的量程压死
+#   (实测: 板上分数通道整列 0.0, 而同一帧 FP32 是 0.93)。网格导出不需要这一条 —— 它的两条
+#   分支本来就接在输出上。
+merge = [o for x in m.metadata_props if x.key == "pulsar2_cut_u16_ops" and x.value
+         for o in x.value.split(",") if o]
+ops = merge + [n.name for n in g.node if any(o in {x.name for x in g.output} for o in n.output)]
+ops = list(dict.fromkeys(o for o in ops if o))
 if ops and os.environ.get("NO_LAST_U16") != "1":
     cfg["quant"]["layer_configs"] = [
         {"layer_names": ops, "data_type": "U16", "output_data_type": "U16"}
     ]
-    print("   输出算子提 U16: %s" % ", ".join(ops))
+    print("   提 U16 的算子: %s" % ", ".join(ops))
+    if merge:
+        print("     (cut_head.py 记下的分支生产者 —— 最后那次 Concat 的输入, 不提它们分数会被压死)")
 
 with open(dst, "w") as f:
     json.dump(cfg, f, indent=2)

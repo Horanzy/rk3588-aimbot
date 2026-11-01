@@ -7,8 +7,9 @@
 #      bash convert.sh -m onnx/mymodel.onnx -n NPU1 -s 200       # 核数 / 标定张数
 #      bash convert.sh -m onnx/mymodel.onnx -F                   # 已存在也重转
 #
-#  顺序: patch_onnx.py(等价改写, 折掉工具链不支持的 Mod) → prep_calib.py(标定集按模型输入
-#        尺寸中心裁剪) → gen_config.py(现生成配置, 含"输出算子提 U16") → pulsar2 build
+#  顺序: cut_head.py(端到端导出先切在"坐标与分数合并"的那张张量上) → patch_onnx.py(等价改写,
+#        折掉工具链不支持的 Mod) → prep_calib.py(标定集按模型输入尺寸中心裁剪) →
+#        gen_config.py(现生成配置, 含"输出算子提 U16") → pulsar2 build
 #
 #  标定集怎么选(两遍走的约定):
 #      dataset/calib_<模型名>.tar   那个游戏自己采的帧 —— 精度最好
@@ -20,6 +21,7 @@
 #  可覆盖: IMG= 镜像 · CALIB= 标定集 · CALIB_SIZE= 张数 · NPU_MODE= 核数
 #          KEEP_QUANT=1 留下 Pulsar2 的 debug 转储(验收要用, 见 check_quant.py)
 #          NO_LAST_U16=1 关掉"输出算子提 U16"(做 A/B)
+#          NO_CUT_HEAD=1 关掉端到端切图(做 A/B)
 # ==============================================================================
 set -u
 ROOT="$(cd "$(dirname "$(realpath "$0")")" && pwd)"
@@ -112,9 +114,19 @@ PY=python3; command -v python3 >/dev/null || PY=python
 $PY -c "import onnx" 2>/dev/null || echo "⚠ 容器内无 onnx 包 — 配置生成会失败"
 $PY -c "import PIL"   2>/dev/null || echo "⚠ 容器内无 PIL — 标定集无法按模型输入尺寸裁剪 (pip install pillow)"
 
-# 等价改写: 折掉工具链不支持的算子(Mod 等)。规则与逐值验证写在 patch_onnx.py。
+# 端到端导出(输出形如 [1, 候选数, 6]、图里带 TopK/Mod/NMS)不能直接转: 工具链的 parser 自检
+#   在"行按分数排序、类别列是离散码"的输出上无法满足, 而且就算关掉自检, 那张把坐标与分数
+#   混在一起的张量也会把置信度压死(实测 300 行全 0.0)。cut_head.py 把"坐标与分数刚合并"
+#   的那张张量的生产者声明成输出、下游那一串自动丢掉, 交回网格布局([1, 4+类数, N], 框换成
+#   主机 src/core/detect 要的 cx,cy,w,h) —— 不是端到端时它什么都不做(rc=3)。判据、依据与
+#   "框的约定"的实测在 cut_head.py 头部。
 BUILD_IN="$MODEL"
-if $PY /data/patch_onnx.py "$MODEL" "/data/work/$OUT_NAME.patched.onnx" \
+if [ "${NO_CUT_HEAD:-}" != "1" ] && $PY /data/cut_head.py "$BUILD_IN" "/data/work/$OUT_NAME.grid.onnx" > "/data/work/$OUT_NAME.cut.log" 2>&1; then
+    BUILD_IN="/data/work/$OUT_NAME.grid.onnx"
+    sed "s/^/   /" "/data/work/$OUT_NAME.cut.log"
+fi
+# 等价改写: 折掉工具链不支持的算子(Mod 等)。规则与逐值验证写在 patch_onnx.py。
+if $PY /data/patch_onnx.py "$BUILD_IN" "/data/work/$OUT_NAME.patched.onnx" \
         > "/data/work/$OUT_NAME.patch.log" 2>&1; then
     BUILD_IN="/data/work/$OUT_NAME.patched.onnx"
     sed "s/^/   /" "/data/work/$OUT_NAME.patch.log"
@@ -157,7 +169,18 @@ if pulsar2 build --target_hardware AX650 --input "$BUILD_IN" --output_dir "/data
 fi
 echo "❌ 失败 — 日志尾部 (全文 work/$OUT_NAME.log):"
 tail -14 "/data/work/$OUT_NAME.log" | sed "s/^/   /"
-grep -aoE "op name: [^,]*, [A-Za-z]+|opset|Unsupported|not support" "/data/work/$OUT_NAME.log" \
-    | sort -u | head -3 | sed "s/^/   ↑ 工具链报的算子/opset: /"
+if grep -q "check onnx parser e2e failed" "/data/work/$OUT_NAME.log"; then
+    # 这一条是工具链自己的 parser 自检, 不是算子不支持: 它把解析前后的输出图逐元素比对,
+    #   而端到端输出是按分数排序的 N 行、类别列还是离散码 —— 一个 ulp 就换行换类, 该检查
+    #   在这一族输出上无法满足。gen_config.py 对端到端输出自动关掉它(理由见那边), 想彻底
+    #   走开这一族就按 README 的"输出形状"一节用 end2end=False 重新导出。
+    echo "   ↑ parser 自检失败 (逐元素比对输出图) —— 端到端输出无法满足它, 不是算子问题。"
+    echo "     gen_config.py 已对端到端输出设 model_check=false。"
+else
+    # 分隔符用竖线: 替换文本里带 "/", 用 "/" 会把 s 命令截断 —— 上面那句老写法正是
+    #   因此报 sed: unknown option to 's'。
+    grep -aoE "op name: [^,]*, [A-Za-z]+|opset|Unsupported|not support" "/data/work/$OUT_NAME.log" \
+        | sort -u | head -3 | sed "s|^|   ↑ 工具链报的算子/opset: |"
+fi
 exit 1
 '
