@@ -129,7 +129,7 @@ int main(int argc, char* argv[]) {
     }
 
     std::string a_m,a_c,a_t,a_y,a_d,a_n,a_x,a_l,a_S,a_k,a_v,a_r,a_D;
-    std::string a_o,a_a,a_e,a_spd,a_adsspd; bool have_e=false;
+    std::string a_o,a_a,a_e,a_spd,a_adsspd,a_smooth,a_lead; bool have_e=false;
     std::string a_M,a_P,a_T; bool pad_dump=false;
     int fire_ms=300; double auto_s=10;
     int cooldown_ms=500; int jpeg_q=95;
@@ -182,6 +182,8 @@ int main(int argc, char* argv[]) {
         else if (arg=="--pad-dump") pad_dump=true;
         else if (arg=="--spd"&&i+1<argc) a_spd=argv[++i];
         else if (arg=="--ads-spd"&&i+1<argc) a_adsspd=argv[++i];
+        else if (arg=="--smooth"&&i+1<argc) a_smooth=argv[++i];
+        else if (arg=="--lead"&&i+1<argc) a_lead=argv[++i];
         else if (arg=="-h"||arg=="--help") {
             std::cout<<"用法: "<<argv[0]<<" [自瞄选项] [采集选项]\n"
                 "\n自瞄选项:\n"
@@ -196,6 +198,11 @@ int main(int argc, char* argv[]) {
                 "  -k <键>   fire/ads/both  -v <y/n> 预览\n"
                 "  --spd <x>[,<y>]      拉枪速度倍率逐轴 (默认 100 = 基线; 调大=更快; 热参 spdx/spdy)\n"
                 "  --ads-spd <x>[,<y>]  ADS 键按住时的同一对 (默认 100; 热参 adsspdx/adsspdy)\n"
+                "  --smooth <pct>      开火期竖直死区高度 (占检测框高 %; 横向宽 = 一半;\n"
+                "                      0 = 关闭, 默认 0; 箱内半增益回拉, 箱外增益 1 — 拉枪原样;\n"
+                "                      热参 smooth)\n"
+                "  --lead <pct>        追踪超前: 瞄准点沿目标绝对屏速前移 pct% × 检测框尺寸\n"
+                "                      (两轴; 0 = 关闭, 默认 0, 上界 50 = 框边; 热参 lead)\n"
                 "  -r <半径>  FOV 半径 px (默认 200, 10–1000)\n"
                 "  -a <y/n>   鼠标接管 (默认 y; n=纯透传: 不注入, 检测/采集照常)\n"
                 "\n参数说明:\n"
@@ -257,6 +264,10 @@ int main(int argc, char* argv[]) {
     float max_spd =std::clamp(numf(!a_x.empty()?a_x:get_input_with_default("最大速度","2667"),"-x"),SPD_CAP_MIN,SPD_CAP_MAX);
     const float max_v=max_spd/1000.0f;
     float init_l=std::clamp(numf(a_l.empty()?std::to_string((int)L_INIT_MS):a_l,"-l"),L_MIN,L_MAX);
+    // 开火期瞄准框: 竖直死区高度 %, 0 = 关闭 (夹取带见 core/state.h)。与热参同带。
+    const int smooth_pct=smooth_clamp(std::lround(numf(a_smooth.empty()?"0":a_smooth,"--smooth")));
+    // 追踪超前: % 检测框宽, 0 = 关闭。
+    const int lead_pct=lead_clamp(std::lround(numf(a_lead.empty()?"0":a_lead,"--lead")));
     if (!args_ok) return 1;                       // 参数面先失败 (锁已取, 设备一个都还没碰)
     const std::string persist_path=a_S;
     // 拉枪速度倍率 (核心语义见 core/state.h): 有效灵敏度 = 基线/(倍率/100),
@@ -343,6 +354,8 @@ int main(int argc, char* argv[]) {
     g_spd_x.store(spd_x); g_spd_y.store(spd_y);
     g_ads_spd_x.store(ads_spd_x); g_ads_spd_y.store(ads_spd_y);
     g_pad_trig_thr.store(pad_trig_thr);
+    g_smooth.store(smooth_pct);
+    g_lead.store(lead_pct);
 
     const bool do_collect=!a_o.empty();
     if (do_collect) { ensure_dir(a_o); ensure_dir(a_o+"/fire");
@@ -384,7 +397,8 @@ int main(int argc, char* argv[]) {
     //   现场第一眼要看清"现在用的是哪个槽"
     std::cout<<"初始: 模式="<<out_mode<<" L="<<init_l<<" ("<<cal_var<<")"
              <<" spd_x="<<spd_x<<" spd_y="<<spd_y
-             <<" ads_spd_x="<<ads_spd_x<<" ads_spd_y="<<ads_spd_y<<" fov="<<fov_r<<"\n";
+             <<" ads_spd_x="<<ads_spd_x<<" ads_spd_y="<<ads_spd_y<<" fov="<<fov_r
+             <<" smooth="<<smooth_pct<<" lead="<<lead_pct<<"\n";
     if (p5g_mode)
         std::cout<<"模式: p5g (对 PS5 呈现 P5 General 手柄 0x2B81/0x0101, 真加密狗"
                     "经 hidraw 签名; 物理手柄全透传"

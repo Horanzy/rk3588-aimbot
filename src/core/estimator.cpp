@@ -28,7 +28,7 @@ static inline float accel_est(float ybar, float m2, float beta, float dt,
 
 float estimator_step(EstimatorState& st, std::chrono::steady_clock::time_point now,
                      bool found, float best_dx, float best_dy,
-                     float l_est, float max_v) {
+                     float box_w, float box_h, float l_est, float max_v) {
     float dt=(float)elapsed_ms(now,st.t_prev); st.t_prev=now;
     dt=std::clamp(dt,1.0f,100.0f);
     // 本帧的自身运动换算快照: 账本来源 (hid = g_counts / pad = 摇杆账本) 与
@@ -129,6 +129,7 @@ float estimator_step(EstimatorState& st, std::chrono::steady_clock::time_point n
           g_target.last_dt=st.last_dt;g_target.last_alpha=st.last_alpha;
           g_target.last_beta=st.last_beta;
           g_target.cs=std::max(st.csx,st.csy)/CUSUM_H;
+          g_target.bw=box_w; g_target.bh=box_h;   // 检测框尺寸 (控制拍按 smooth% 导瞄准框)
           g_target.l_est_ms=l_est;
           g_target.t_pub=now;g_target.valid=true; }
     } else {

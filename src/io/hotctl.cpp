@@ -55,6 +55,24 @@ bool hotctl_apply(const char* key, const char* val) {
         std::cout<<"[热参] "<<key<<"="<<iv<<"\n";
         return true;
     }
+    // 开火期瞄准框: 竖直死区高度 %, 0 = 关闭; 与 CLI --smooth 同一夹取带
+    if (!strcmp(key,"smooth")) {
+        float v=0;
+        if (!num_val(val,v)) { std::cout<<"[热参] 忽略 smooth="<<val<<" (非数值)\n"; return false; }
+        const int iv=smooth_clamp(std::lround(v));
+        g_smooth.store(iv);
+        std::cout<<"[热参] smooth="<<iv<<"\n";
+        return true;
+    }
+    // 追踪超前: 瞄准点沿目标绝对屏速前移的百分比 (0 = 关闭); 与 CLI --lead 同带
+    if (!strcmp(key,"lead")) {
+        float v=0;
+        if (!num_val(val,v)) { std::cout<<"[热参] 忽略 lead="<<val<<" (非数值)\n"; return false; }
+        const int iv=lead_clamp(std::lround(v));
+        g_lead.store(iv);
+        std::cout<<"[热参] lead="<<iv<<"\n";
+        return true;
+    }
     if (!strcmp(key,"k")) {
         int m=!strcmp(val,"fire")?0:!strcmp(val,"ads")?1:!strcmp(val,"both")?2:-1;
         if (m>=0) { g_aim_mode.store(m); std::cout<<"[热参] k="<<val<<"\n"; return true; }
@@ -98,7 +116,7 @@ void hotctl_thread() {
         std::cerr<<"⚠ 热参数通道绑定失败 (端口 "<<HOT_CTL_PORT<<" 被占), 热参不可用\n";
         close(fd); return; }
     std::cout<<"✅ 热参数通道: 127.0.0.1:"<<HOT_CTL_PORT
-             <<" (t/y/x/fov/padthr/spdx/spdy/adsspdx/adsspdy/k/aim/padcalib/cap_*)\n";
+             <<" (t/y/x/fov/padthr/smooth/lead/spdx/spdy/adsspdx/adsspdy/k/aim/padcalib/cap_*)\n";
     struct pollfd pfd{}; pfd.fd=fd; pfd.events=POLLIN;
     char buf[256];
     while (global_running) {

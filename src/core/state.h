@@ -106,6 +106,9 @@ extern std::atomic<bool>  g_aim_enabled;             // 鼠标接管 (-a / 热�
 extern std::atomic<bool>  g_cap_fire;                // 采集源开关 (-e / 热参): 开火截图
 extern std::atomic<bool>  g_cap_det;                 //   检测截图
 extern std::atomic<bool>  g_cap_auto;                //   定时截图
+extern std::atomic<int>   g_smooth;                  // 开火期瞄准框: 竖直死区高度 % (--smooth / 热参
+                                                     //   smooth; 0=关闭; 几何见 core/control.h)
+extern std::atomic<int>   g_lead;                    // 追踪超前 % (--lead / 热参 lead; 0=关闭)
 
 // ---- 数值参数的夹取带 (唯一定义点): 命令行给的是初值, 热参给的是运行中那一份 —— 两处
 //      同带, 于是"命令行绕过热参夹取"这种缝不存在 (-t/-y 曾只在热参侧夹取)。带本身的
@@ -115,6 +118,20 @@ constexpr float CONF_THR_MIN = 0.0f,   CONF_THR_MAX = 1.0f;
 constexpr float Y_OFF_PCT_MIN = 0.0f,  Y_OFF_PCT_MAX = 100.0f;
 constexpr float SPD_CAP_MIN = 100.0f,  SPD_CAP_MAX = 20000.0f;   // 速度帽 px/s (有意义带见 AGENTS 的 -x 推导)
 constexpr float FOV_RADIUS_MIN = 10.0f, FOV_RADIUS_MAX = 1000.0f;
+// 开火期瞄准框: smooth = 竖直死区高度, 占检测框高度的百分比 (横向宽 = 它的一半)。
+//   0 = 关闭; 100 = 整个检测框高 (上界只是防误输入)。框的几何随目标距离缩放
+//   (检测框本身就是视角尺寸), 所以同一个百分比在近/远距离都是"躯干窗"。
+constexpr int SMOOTH_MIN = 0, SMOOTH_MAX = 100;
+inline int smooth_clamp(long v) {
+    return (int)std::clamp<long>(v, (long)SMOOTH_MIN, (long)SMOOTH_MAX);
+}
+// 追踪超前百分比: 瞄准点沿目标绝对屏速方向前移 lead% × 检测框尺寸 (两轴都生效,
+//   law_tick 里逐轴夹在框内)。0 = 关闭; 50 = 前移到检测框的右/左边缘 (再大就出了
+//   身体框, 故上界 50)。
+constexpr int LEAD_MIN = 0, LEAD_MAX = 50;
+inline int lead_clamp(long v) {
+    return (int)std::clamp<long>(v, (long)LEAD_MIN, (long)LEAD_MAX);
+}
 // 起手延迟 (ms): 标定是 L 的唯一起源, 它只在第一轮标定之前被用到 —— 取带 [L_MIN, L_MAX]
 //   的中点 60 是选择规则 (中点的先验误差最小), 一轮标定就把它换掉。
 constexpr float L_INIT_MS = 60.0f;
@@ -157,6 +174,9 @@ struct TargetState {
     bool  valid = false;
     std::chrono::steady_clock::time_point t_pub;
     float l_est_ms = L_INIT_MS;                  // 标定量: 环路延迟 (ms), 唯一被回写的量
+    // 本帧选中检测框的宽/高 (px): 开火期瞄准框的半宽/半高由它按 smooth% 导出
+    //   (hy = smooth·bh/200, hx = smooth·bw/400)。采集线程逐帧写; 目标越远框越小。
+    float bw = 0, bh = 0;
     std::mutex mtx;
 };
 extern TargetState g_target;

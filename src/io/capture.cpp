@@ -400,6 +400,7 @@ void ai_thread(std::string model_path, int target_cls, int num_classes,
         std::vector<Detection> filtered;
         bool found = false;
         float best_dx = 0, best_dy = 0;
+        float best_bw = 0, best_bh = 0;   // 选中检测框的宽/高 (控制拍按 smooth% 导开火期瞄准框)
         // 本帧的 640 BGR 窗口 — 三个消费者 (截图落盘 / 标定相关域 / 预览) 复用同一帧的
         //   同一次裁剪; 标定期它已经裁出来了, 因此那一轮不会为预览多付一次 RGA
         const RgaDst* bgr = nullptr;
@@ -420,6 +421,7 @@ void ai_thread(std::string model_path, int target_cls, int num_classes,
                 const float dist = std::sqrt(dx * dx + dy * dy);
                 if (dist < best_dist && dist < fov_r) {
                     best_dist = dist; best_dx = dx; best_dy = dy; found = true;
+                    best_bw = d.w; best_bh = d.h;
                 }
             }
             // 帧龄 = 取一帧 + RGA + 推理的总时长 (帧时间戳 → 检测就绪), 是这条链的端到端
@@ -481,7 +483,8 @@ void ai_thread(std::string model_path, int target_cls, int num_classes,
         //   (一次快照, 见 core/estimator.cpp); 标定期 found=false, 发布的目标自然过期。
         //   返回的实测 dt 是标定读数的量化底 (边沿 ±dt/2 与尾迹的 dt_first), 故采样
         //   必须在它之后。
-        const float dt = estimator_step(est, now, found, best_dx, best_dy, l_est, max_v);
+        const float dt = estimator_step(est, now, found, best_dx, best_dy,
+                                        best_bw, best_bh, l_est, max_v);
 
         if (cal_collecting) {
             bgr = pipe.bgr_window(src, &err);

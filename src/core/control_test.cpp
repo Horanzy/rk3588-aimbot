@@ -12,6 +12,10 @@
 //    [6] 热参路径: spdx 改后下一拍生效; 非数值与不在白名单里的 key 被拒绝
 //    [7] 标定回写: 三套输出各写各的延迟 VAR (整体逐字比对: 只动自己那一格的那一个
 //        字符区间), 模板的守卫写法与行内注释原样保住; 裸行/缺行两种落点各有一种写法
+//    [8] 开火期瞄准框: 几何 (竖直死区高度 % → 半高, 横向宽 = 一半)、软死区的恒等/
+//        箱内增益 c/远场偏移 (1−c)h/奇对称/单调、smooth_clamp 带与热参路径
+//    [9] 追踪超前: 绝对方向取反、速度饱和、静止=0、逐轴夹在检测框内 (永不越框)、
+//        lead_clamp 带与热参路径
 //  全部断言通过输出 ALL PASS 并返回 0; 任一断言失败返回非零 (compile.sh 的 set -e
 //  终止编译)。
 // ============================================================================
@@ -229,12 +233,12 @@ int main() {
             EstimatorState est;
             g_counts.clear();
             auto t0 = std::chrono::steady_clock::now();
-            estimator_step(est, t0, true, 0.0f, 0.0f, (float)T_L, 20.0f);
+            estimator_step(est, t0, true, 0.0f, 0.0f, 100.0f, 220.0f, (float)T_L, 20.0f);
             auto t1 = shift_ms(t0, 10.0);
             ledger_plateau(shift_ms(t1, -65.0), 0, 0);      // 飞行窗 [t1−65, t1−55]:
             ledger_set(shift_ms(t1, -60.0), 10, 4);         //   窗内 Δcounts = (10,4)
             ledger_plateau(shift_ms(t1, -55.0), 10, 4);
-            estimator_step(est, t1, true, -8.0f, -3.0f, (float)T_L, 20.0f);
+            estimator_step(est, t1, true, -8.0f, -3.0f, 100.0f, 220.0f, (float)T_L, 20.0f);
             std::lock_guard<std::mutex> lk(g_target.mtx);
             out_px = g_target.px; out_py = g_target.py;
         };
@@ -355,6 +359,93 @@ int main() {
               && slurp() == "#!/bin/bash\nHID_L_EST=\"${HID_L_EST:-60.0}\"\nP5G_L_EST=58.0\n",
               "缺行 → 追加 (写的是调用方给的 VAR 名, 与 webui 追加同一种写法)");
         ::unlink(path.c_str());
+    }
+
+    std::cout << "\n[8] 开火期瞄准框 (软死区): 几何 / 软死区 / 夹取与热参\n";
+    {
+        // 几何: smooth = 竖直死区高度占检测框高的 %; 横向宽 = 一半。bbox 100×220,
+        //   smooth=25 → 竖直 55px 高 (半高 27.5), 横向 12.5px 宽 (半宽 6.25)
+        CHECK(std::fabs(smooth_half_h(25, 220.0f) - 27.5f) < 1e-5f,
+              "smooth=25 / bbox 高 220 → 半高 27.5px");
+        CHECK(std::fabs(smooth_half_w(25, 100.0f) - 6.25f) < 1e-5f,
+              "smooth=25 / bbox 宽 100 → 半宽 6.25px (横向宽 = 竖直的一半)");
+        CHECK(smooth_half_h(0, 220.0f) == 0.0f && smooth_half_w(0, 100.0f) == 0.0f,
+              "smooth=0 → 半宽/半高 0 (关闭)");
+        CHECK(std::fabs(smooth_half_h(100, 220.0f) - 110.0f) < 1e-5f
+              && std::fabs(smooth_half_w(100, 100.0f) - 25.0f) < 1e-5f,
+              "smooth=100 → 半高 = 框高/2, 半宽 = 框宽/4 (100% 的口径自洽)");
+        CHECK(std::fabs(2.0f * smooth_half_h(25, 220.0f) / 220.0f
+                        - 2.0f * smooth_half_w(25, 100.0f) / 100.0f * 2.0f) < 1e-5f,
+              "竖直高度与横向宽度的百分比关系 = 2:1");
+
+        // 软死区: h=0 或 c=1 恒等; 箱内小误差增益≈c; 远场 = e−(1−c)h (增益→1)
+        const float h = 27.5f, c = BOX_CENTER_GAIN, d = 1e-3f * h;
+        CHECK(smooth_axis(37.0f, 0.0f, c) == 37.0f, "h=0 → 恒等 (关闭)");
+        CHECK(smooth_axis(37.0f, h, 1.0f) == 37.0f, "c=1 → 恒等 (点瞄准)");
+        CHECK(std::fabs(smooth_axis(d, h, c) - c * d) < 1e-4f,
+              "箱内小误差 ≈ c·e (中心回拉)");
+        CHECK(std::fabs(smooth_axis(10.0f * h, h, c)
+                        - (10.0f * h - (1.0f - c) * h)) < 1e-2f,
+              "远场 = e − (1−c)h (偏移固定, 不随误差增长)");
+        const float e0 = 5.0f * h;
+        CHECK(std::fabs(smooth_axis(-e0, h, c) + smooth_axis(e0, h, c)) < 1e-4f,
+              "奇对称 (横向左右一致)");
+        const float g0 = (smooth_axis(d, h, c) - smooth_axis(-d, h, c)) / (2.0f * d);
+        const float gF = (smooth_axis(20.0f * h + d, h, c)
+                          - smooth_axis(20.0f * h - d, h, c)) / (2.0f * d);
+        CHECK(std::fabs(g0 - c) < 1e-3f, "e=0 处增益 = c");
+        CHECK(std::fabs(gF - 1.0f) < 1e-2f, "远场增益 = 1 (大误差/拉枪原样 — 锁的远场)");
+        bool mono = true;
+        for (float e = 0.0f; e < 200.0f; e += 5.0f) {
+            if (smooth_axis(e + 5.0f, h, c) < smooth_axis(e, h, c)) mono = false;
+        }
+        CHECK(mono, "单调 (误差越大指令越大, 无反向)");
+
+        // 夹取带与热参 (CLI 与热参共用同一份 smooth_clamp)
+        CHECK(smooth_clamp(-1) == SMOOTH_MIN && smooth_clamp(0) == 0
+              && smooth_clamp(101) == SMOOTH_MAX && smooth_clamp(999999) == SMOOTH_MAX,
+              "smooth_clamp: [0, 100] 防误输入");
+        CHECK(hotctl_apply("smooth", "25") && g_smooth.load() == 25,
+              "热参 smooth=25 → 运行值 25");
+        CHECK(hotctl_apply("smooth", "250") && g_smooth.load() == SMOOTH_MAX,
+              "热参 smooth 越界 → 夹到 100");
+        CHECK(!hotctl_apply("smooth", "x") && g_smooth.load() == SMOOTH_MAX,
+              "热参 smooth 非数值 → 拒绝, 原值不动");
+        g_smooth.store(0);
+    }
+
+    std::cout << "\n[9] 追踪超前: 绝对方向 / 速度饱和 / 永不越框\n";
+    {
+        CHECK(lead_offset_px(0, 100.0f, 0.5f) == 0.0f,
+              "lead=0 → 0 (瞄准点不偏, 留在中心)");
+        CHECK(std::fabs(lead_offset_px(5, 100.0f, 0.25f) - 5.0f) < 1e-4f,
+              "5% × 100px @ 饱和速度 0.25 → 5px");
+        CHECK(std::fabs(lead_offset_px(5, 100.0f, 0.125f) - 2.5f) < 1e-4f,
+              "半个饱和速度 → 半个超前 (慢目标按比例)");
+        CHECK(std::fabs(lead_offset_px(5, 100.0f, -0.25f) + 5.0f) < 1e-4f,
+              "目标向左 → 超前取反 (绝对方向)");
+        CHECK(std::fabs(lead_offset_px(5, 100.0f, 1.0f) - 5.0f) < 1e-4f,
+              "超过饱和速度不再增大");
+        CHECK(lead_offset_px(5, 100.0f, 0.0f) == 0.0f,
+              "静止目标 → 0 (零附近连续, 无符号抖振)");
+        // 永不越框 (最后一步夹取): 先正常算, 再把瞄准点的绝对位置夹进 [0, bbox_dim]。
+        //   aim_frac 是瞄准点从**框顶**算的比例 (固件 -y 65 = 从脚 65% = 从顶 0.35)。
+        CHECK(std::fabs(lead_clamped_axis_px(50, 100.0f, 1.0f, 0.5f) - 50.0f) < 1e-4f,
+              "横向 50% → 瞄准点钉在框边, 不越框");
+        CHECK(std::fabs(lead_clamped_axis_px(50, 220.0f, 1.0f, 0.65f) - 77.0f) < 1e-4f,
+              "向下越界 → 钉在框下边 (下余量 35%·220 = 77px)");
+        CHECK(std::fabs(lead_clamped_axis_px(50, 220.0f, -1.0f, 0.35f) + 77.0f) < 1e-4f,
+              "向上越界 → 钉在框上边 (上余量 35%·220 = 77px)");
+        CHECK(std::fabs(lead_clamped_axis_px(50, 220.0f, 1.0f, 0.35f) - 110.0f) < 1e-4f,
+              "框内不触发夹取 (下余量 143px > 110)");
+        CHECK(lead_clamp(-1) == LEAD_MIN && lead_clamp(51) == LEAD_MAX
+              && lead_clamp(5) == 5, "lead_clamp: [0, 50] 防误输入");
+        CHECK(hotctl_apply("lead", "5") && g_lead.load() == 5, "热参 lead=5 → 运行值 5");
+        CHECK(hotctl_apply("lead", "99") && g_lead.load() == LEAD_MAX,
+              "热参 lead 越界 → 夹到 50");
+        CHECK(!hotctl_apply("lead", "x") && g_lead.load() == LEAD_MAX,
+              "热参 lead 非数值 → 拒绝, 原值不动");
+        g_lead.store(0);
     }
 
     std::cout << (g_fail ? "FAILED\n" : "ALL PASS\n");

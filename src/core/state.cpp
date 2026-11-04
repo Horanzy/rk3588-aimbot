@@ -31,6 +31,8 @@ std::atomic<bool>  g_aim_enabled{true};              // 鼠标接管 (-a / 热�
 std::atomic<bool>  g_cap_fire{true};                 // 采集源开关 (-e / 热参): 开火截图
 std::atomic<bool>  g_cap_det{true};                  //   检测截图
 std::atomic<bool>  g_cap_auto{true};                 //   定时截图
+std::atomic<int>   g_smooth{0};                      // 开火期瞄准框: 竖直死区高度 % (0 = 关闭)
+std::atomic<int>   g_lead{0};                        // 追踪超前 % (0 = 关闭)
 
 std::atomic<int>   g_spd_x{SPD_BASE}, g_spd_y{SPD_BASE};            // 拉枪速度倍率, 腰射 (100 = 基线)
 std::atomic<int>   g_ads_spd_x{SPD_BASE}, g_ads_spd_y{SPD_BASE};    //   同上, ADS 键按住期间
