@@ -127,9 +127,11 @@ def build_argv(root: Path, params: dict, script_path: Path) -> list:
     l_v = params.get(discover.mode_l_key(mode))
     if l_v is not None:
         argv += ["-l", fmt_num(l_v)]
-    if mode in ("pad", "p5g"):
+    if mode in ("pad", "p5g", "rp"):
         argv += ["-M", mode, "-P", str(params.get("pad_keyword") or ""),
                  "-T", fmt_num(params.get("pad_trig_thr", 6.0))]
+        if mode == "rp":
+            argv += ["--rp-account", str(root / "run" / "rp-account")]
         if params.get("pad_dump"):
             argv.append("--pad-dump")
     else:

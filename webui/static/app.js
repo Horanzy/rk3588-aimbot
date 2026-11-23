@@ -88,10 +88,10 @@ async function api(path, opts) {
 }
 
 /* ================= 参数定义 (ⓘ 文案与热/冷标记) ================= */
-/* ---- 三套输出各占一组 5 个值 (延迟 1 + 拉枪倍率 4) ----
+/* ---- 四套输出各占一组 5 个值 (延迟 1 + 拉枪倍率 4) ----
    切换【输出模式】= 显示/编辑另一槽的这 5 个值; 保存只提交本槽 (savePatch), 标定回写也只
-   落进本槽 (固件的 HID_L_EST / PAD_L_EST / P5G_L_EST 三选一)。分槽是必须的: 同一个倍率数
-   在两套口径下含义不同 (下面的 base), 延迟也各是自己的物理量 (p5g 还多一跳加密狗签名往返)。 */
+   落进本槽 (固件的 HID_L_EST / PAD_L_EST / P5G_L_EST / RP_L_EST 四选一)。分槽是必须的: 同一个倍率数
+   在两套口径下含义不同 (下面的 base), 延迟也各是自己的物理量 (p5g 还多一跳加密狗签名往返, rp 走局域网遥控游玩)。 */
 const MODE_SLOT = [
   { mode: "hid", title: "hid — USB 鼠标 → PC", lvar: "HID_L_EST",
     base: "基线 = 1.0 px/count (counts 直接进游戏, 游戏内鼠标灵敏度是另一半)" },
@@ -99,6 +99,8 @@ const MODE_SLOT = [
     base: "基线 = 满偏屏速 3000 px/s (控制律的注入按它折算摇杆偏转)" },
   { mode: "p5g", title: "p5g — P5 General → PS5", lvar: "P5G_L_EST",
     base: "基线 = 满偏屏速 3000 px/s (与 pad 同一条注入/合并链, 线上那端是 PS5)" },
+  { mode: "rp", title: "rp — PS5 遥控游玩 → PS5", lvar: "RP_L_EST",
+    base: "基线 = 满偏屏速 3000 px/s (与 pad 同一条注入/合并链, 经局域网 UDP 送达 PS5)" },
 ];
 const SLOT_SPD = [
   { a: "spd_x", label: "速度倍率 X — 腰射", hot: "spdx",
@@ -128,16 +130,16 @@ function modeSlotRows() {
 }
 
 const PARAM_DEFS = [
-  { group: "输出模式与设备", key: "output_mode", label: "输出模式", type: "select", options: ["hid", "pad", "p5g"], hot: false,
-    labels: { hid: "hid — USB 鼠标 → PC", pad: "pad — XInput 手柄 → PC", p5g: "p5g — P5 General → PS5" },
-    info: "输出通道, 三选一互斥, 各自独占 UDC。hid: 通用 USB 鼠标, 游戏内鼠标灵敏度生效 (读鼠标, 用 -D 选设备)。pad: 物理手柄全透传 + 控制律注入右摇杆, 本机呈现微软有线 360 手柄 (0x045E/0x028E), 宿主 XInput 直接认。p5g: 同一输入/合并/标定链面向 PS5, 本机呈现 P5 General 手柄 (0x2B81/0x0101), 且需要真加密狗插在本机 USB 口作签名协处理器 —— 每份报告经它签名后才上线, 缺席时线上不产生任何报告。手柄模式读手柄、不读鼠标; hid 读鼠标、不碰手柄。❄ 冷参数 (它决定整条后端), 下次启动生效。" },
+  { group: "输出模式与设备", key: "output_mode", label: "输出模式", type: "select", options: ["hid", "pad", "p5g", "rp"], hot: false,
+    labels: { hid: "hid — USB 鼠标 → PC", pad: "pad — XInput 手柄 → PC", p5g: "p5g — P5 General → PS5", rp: "rp — PS5 遥控游玩 → PS5" },
+    info: "输出通道, 四选一互斥。hid/pad/p5g 各自独占 UDC; rp 走局域网 UDP 不占 UDC。hid: 通用 USB 鼠标, 游戏内鼠标灵敏度生效 (读鼠标, 用 -D 选设备)。pad: 物理手柄全透传 + 控制律注入右摇杆, 本机呈现微软有线 360 手柄 (0x045E/0x028E), 宿主 XInput 直接认。p5g: 同一输入/合并/标定链面向 PS5, 本机呈现 P5 General 手柄 (0x2B81/0x0101), 且需要真加密狗插在本机 USB 口作签名协处理器 —— 每份报告经它签名后才上线, 缺席时线上不产生任何报告。rp: libchiaki 纯控制会话经局域网 UDP 直连 PS5 遥控游玩服务 (音视频全丢, 需先用 build/rp_regist 生成 run/rp-account)。手柄模式读手柄、不读鼠标; hid 读鼠标、不碰手柄。❄ 冷参数 (它决定整条后端), 下次启动生效。" },
   { group: "输出模式与设备", key: "mouse_keyword", label: "鼠标匹配子串 -D", type: "text", hot: false, showIfMode: ["hid"],
     info: "按 /dev/input/by-id 的子串挑鼠标 (留空 = 任一 *-event-mouse, 取字典序首个)。注意: 手柄插着时它的辅助鼠标接口也匹配空模式, 想让人手通道干净就在这里点名真鼠标。多个命中会被固件判为错误并列出候选。❄ 冷参数, 下次启动生效。" },
-  { group: "输出模式与设备", key: "pad_keyword", label: "手柄匹配子串 -P", type: "text", hot: false, showIfMode: ["pad", "p5g"],
+  { group: "输出模式与设备", key: "pad_keyword", label: "手柄匹配子串 -P", type: "text", hot: false, showIfMode: ["pad", "p5g", "rp"],
     info: "按 /dev/input/by-id 的子串挑手柄 (留空 = 任一 *-event-joystick 节点; P5 General 加密狗自身的节点已被固件排除)。手柄的额外按键可能挂在同一个 USB 设备的第二个接口上, 固件按 VID:PID 找齐兄弟节点一并读取, 所以这里点名手柄本体即可。❄ 冷参数, 下次启动生效。" },
-  { group: "输出模式与设备", key: "pad_trig_thr", label: "手柄触发阈值 -T", type: "num", min: 0, max: 100, step: 1, unit: "%", hot: true, showIfMode: ["pad", "p5g"],
+  { group: "输出模式与设备", key: "pad_trig_thr", label: "手柄触发阈值 -T", type: "num", min: 0, max: 100, step: 1, unit: "%", hot: true, showIfMode: ["pad", "p5g", "rp"],
     info: "手柄扳机 (RT/LT 两键共享) 的自瞄触发门槛, 按满量程百分比。它只门控「自瞄认为扳机按下了没有」, 再与 -k 的 fire/ads/both 语义一起决定开火/开镜; 扳机模拟量本身 1:1 透传给游戏, 不过阈值也不 reshape。默认 6 = 该手柄扳机实测 flat 15/255 的上取整 (低于它的读数只在噪声里抖)。手柄换型后按新 flat 调。🔥 热参数 (padthr), 保存即生效。" },
-  { group: "输出模式与设备", key: "pad_dump", label: "合并态调试输出 --pad-dump", type: "bool", hot: false, showIfMode: ["pad", "p5g"],
+  { group: "输出模式与设备", key: "pad_dump", label: "合并态调试输出 --pad-dump", type: "bool", hot: false, showIfMode: ["pad", "p5g", "rp"],
     info: "开启后每 ≥50ms 在日志打一行合并后的逻辑态 (rx/ry = 人手 + 注入, 带 fire/ads/aim_gate)。这是分辨「注入没到游戏」还是「律根本没下命令」的唯一手段; 标定期打印的就是激励波形。只想正常玩时关掉。❄ 冷参数, 下次启动生效。" },
   { group: "瞄准", key: "model", label: "模型 axmodel", type: "model", hot: false,
     info: "AX 模型 (.axmodel, engine/ 下选择)。模型的转换在本仓库之外完成 (AX 工具链), 换芯片或换 AXCL 运行时版本后需重新转一次, 转好的文件放进 engine/ 即出现在此下拉。冷参数, 下次启动生效。" },
@@ -437,7 +439,7 @@ function renderRunTab() {
                        : (inst.adopted ? "认领实例无日志" : "");
   const mi = inst.model_info;
   const MODE_LABEL = { hid: "hid — 鼠标 → PC", pad: "pad — XInput 手柄 → PC",
-                       p5g: "p5g — P5 General → PS5" };
+                       p5g: "p5g — P5 General → PS5", rp: "rp — PS5 遥控游玩 → PS5" };
   const cards = [
     { k: "输出模式", v: esc(mode), small: mode === "hid" ? "-D 选鼠标" : "-P/-T 选手柄",
       t: MODE_LABEL[mode] || mode },
@@ -480,7 +482,7 @@ function renderRunTab() {
   } else rb.classList.add("hidden"), rb.className = "banner hidden";
 
   // 标定卡片: 触发方式按模式给 —— hid 只有鼠标双侧键长按, 手柄模式还有这个按钮
-  const gamepad = (mode === "pad" || mode === "p5g");
+  const gamepad = (mode === "pad" || mode === "p5g" || mode === "rp");
   $("#btnCalib").disabled = !(gamepad && inst.state === "running" && !inst.adopted
                               && inst.hot_capable);
   $("#calibMode").textContent = MODE_LABEL[mode] || mode;
@@ -1084,6 +1086,81 @@ function bindEvents() {
   });
 
   // 设置
+  async function loadRpStatus() {
+    try {
+      const r = await api("/api/rp/status");
+      const acc = r.account || {};
+      const sel = $("#rpIface");
+      const curIface = sel.value;
+      sel.innerHTML = `<option value="">自动 (${(r.wired_ifaces || []).map(i => i.name + ":" + i.state).join(", ") || "无有线口"})</option>` +
+        (r.wired_ifaces || []).map(i => `<option value="${esc(i.name)}">${esc(i.name)} (${esc(i.state)})</option>`).join("");
+      if (acc.iface) sel.value = acc.iface;
+      else if (curIface) sel.value = curIface;
+      if (acc.paired) {
+        $("#rpStatusBadge").textContent = `已配对: ${acc.host || ""}${acc.name ? " (" + acc.name + ")" : ""}`;
+        if (!$("#rpHost").value && acc.host) $("#rpHost").value = acc.host;
+        if (!$("#rpAccountId").value && acc.account_id) $("#rpAccountId").value = acc.account_id;
+        if (!$("#rpName").value && acc.name) $("#rpName").value = acc.name;
+      } else {
+        $("#rpStatusBadge").textContent = r.has_regist_bin ? "未配对" : "未配对 (需先编译 build/rp_regist)";
+      }
+      if (r.login_url) $("#rpLoginLink").href = r.login_url;
+    } catch (e) {
+      $("#rpStatusBadge").textContent = "读取失败";
+    }
+  }
+  const rpShow = txt => {
+    const el = $("#rpLog");
+    el.textContent = txt;
+    el.classList.remove("hidden");
+  };
+  loadRpStatus();
+  $("#btnRpRefresh").addEventListener("click", loadRpStatus);
+  $("#btnRpDiscover").addEventListener("click", async () => {
+    try {
+      rpShow("正在经有线网卡扫描局域网 PS5...");
+      const r = await api("/api/rp/discover", { method: "POST", body: { iface: $("#rpIface").value } });
+      if (r.hosts && r.hosts.length) {
+        $("#rpHost").value = r.hosts[0].host;
+        if (!$("#rpName").value && r.hosts[0].name) $("#rpName").value = r.hosts[0].name;
+        rpShow(`经 ${r.iface} 发现 ${r.hosts.length} 台主机:\n` +
+          r.hosts.map(h => `  ${h.host}  ${h.name} (${h.type})`).join("\n"));
+        toast("已填入扫描到的 PS5 IP", "ok");
+      } else {
+        rpShow(`经 ${r.iface} 未收到响应 (确认 PS5 已开机或开启待机网络连接)`);
+      }
+    } catch (e) { rpShow("扫描失败: " + e.message); toast("扫描失败: " + e.message, "err"); }
+  });
+  $("#btnRpExchange").addEventListener("click", async () => {
+    try {
+      const r = await api("/api/rp/exchange-code", { method: "POST", body: { redirect_url: $("#rpRedirectUrl").value } });
+      $("#rpAccountId").value = r.account_id;
+      rpShow(`换算成功: onlineId=${r.online_id || "?"}  account_id=${r.account_id}`);
+      toast("已填入 Account-ID", "ok");
+    } catch (e) { rpShow("换算失败: " + e.message); toast("换算失败: " + e.message, "err"); }
+  });
+  $("#btnRpPair").addEventListener("click", async () => {
+    try {
+      rpShow("正在配对 (请确保 PS5 停留在「关联设备」8 位 PIN 界面)...");
+      const r = await api("/api/rp/pair", { method: "POST", body: {
+        host: $("#rpHost").value, account_id: $("#rpAccountId").value,
+        pin: $("#rpPin").value, name: $("#rpName").value, iface: $("#rpIface").value,
+      }});
+      $("#rpPin").value = "";
+      rpShow(r.output || "配对成功");
+      toast("PS5 配对成功并已保存", "ok");
+      await loadRpStatus();
+    } catch (e) { rpShow("配对失败:\n" + e.message); toast("配对失败", "err"); }
+  });
+  $("#btnRpProbe").addEventListener("click", async () => {
+    try {
+      rpShow("正在探测 PS5 纯控制会话...");
+      const r = await api("/api/rp/probe", { method: "POST", body: { iface: $("#rpIface").value } });
+      rpShow(r.output || (r.ok ? "探测成功" : "探测失败"));
+      toast(r.ok ? "PS5 连通探测成功" : "PS5 连通探测失败", r.ok ? "ok" : "err");
+    } catch (e) { rpShow("探测失败: " + e.message); toast("探测失败: " + e.message, "err"); }
+  });
+
   $("#btnRootSave").addEventListener("click", async () => {
     try {
       await api("/api/config", { method: "POST", body: { deploy_root: $("#rootInput").value.trim() } });

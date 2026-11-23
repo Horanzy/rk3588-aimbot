@@ -16,12 +16,12 @@
 #        手柄模式 = L3+R3 (或 webui 的「开始标定」按钮)。程序按轴给出交替激励 (行程到位即停,
 #        段后停顿), 块相位相关测背景位移, 三个独立读数 (尾迹和 = 主读数 / 起始沿 / 停止沿)
 #        给出环路延迟; 成功 = 点头 + 只回写**本输出模式**的延迟 VAR (hid: HID_L_EST /
-#        pad: PAD_L_EST / p5g: P5G_L_EST), 值就是标定出的**物理环路延迟** (律的时间戳锚点是
+#        pad: PAD_L_EST / p5g: P5G_L_EST / rp: RP_L_EST), 值就是标定出的**物理环路延迟** (律的时间戳锚点是
 #        帧交付时刻, 该时刻之后的推理段由律的 age 每拍承载, 进 L 就是同一段算两遍); 失败 =
 #        摇头 + 原因, 什么都不写。
-#        速度一概不标: 手感由下面三组倍率调。
+#        速度一概不标: 手感由下面四组倍率调。
 #
-#  三套输出各占一组 5 个值 (延迟 1 + 拉枪倍率 4): 切换 OUTPUT_MODE 就是整套自动换, 三套
+#  四套输出各占一组 5 个值 (延迟 1 + 拉枪倍率 4): 切换 OUTPUT_MODE 就是整套自动换, 四套
 #        互不影响, 标定/保存也只落进本模式那一格。
 # ==============================================================================
 
@@ -38,25 +38,30 @@ APP="$ROOT/bin/aimbot"
 MODEL_PATH="${MODEL_PATH:-$ROOT/engine/example.axmodel}"  # ← 改成 engine/ 下你实际转好的模型
 
 # ---- 输出模式 ----
-# 三个模式互斥, 各自独占 UDC; 一次运行只居其一 (hid 读鼠标, 手柄模式读手柄)。
+# 四个模式互斥, 一次运行只居其一 (hid 读鼠标, 手柄模式读手柄); hid/pad/p5g 各自独占 UDC,
+#   rp 走局域网 UDP 直连 PS5 遥控游玩服务 (不占 UDC)。
 #   hid = 通用 USB 鼠标 → PC 游戏 (游戏内鼠标灵敏度生效; -D 选鼠标)
 #   pad = 物理手柄全透传 + 控制律注入右摇杆 → PC; 本机呈现微软有线 360 手柄
 #         (0x045E/0x028E), 宿主的 XInput 栈直接把它当手柄读
 #   p5g = 同一输入/合并/标定链 → PS5; 本机呈现 P5 General 手柄 (0x2B81/0x0101),
 #         真加密狗插本机 USB 口作签名协处理器 —— 每份报告先交它签名, 只有它返回的
 #         字节才发上线; 加密狗不在位时线上不产生任何报告
-# 手柄模式 (pad / p5g): 按键/摇杆/扳机模拟量 1:1 透传, 扳机只有"是否触发"过阈值;
+#   rp  = 同一输入/合并/标定链 → PS5; libchiaki 纯控制会话直连 PS5 遥控游玩服务
+#         (音视频全丢, 不占 UDC; 需先用 build/rp_regist 生成凭据文件 RP_ACCOUNT)
+# 手柄模式 (pad / p5g / rp): 按键/摇杆/扳机模拟量 1:1 透传, 扳机只有"是否触发"过阈值;
 #   控制律期望速度按逐轴有效满偏屏速折算成右摇杆注入偏转, 与人类通道径向合并。
-OUTPUT_MODE="${OUTPUT_MODE:-hid}"   # hid / pad / p5g
-PAD_KEYWORD="${PAD_KEYWORD:-}"      # pad/p5g: 手柄 by-id 匹配子串 (空 = 任意 *-event-joystick 节点;
+OUTPUT_MODE="${OUTPUT_MODE:-hid}"   # hid / pad / p5g / rp
+RP_ACCOUNT="${RP_ACCOUNT:-$ROOT/run/rp-account}" # rp: 配对凭据文件路径 (--rp-account)
+RP_IFACE="${RP_IFACE:-}"            # rp: 强制绑定的有线网卡 (空 = 自动检测物理有线以太网; 禁止无线)
+PAD_KEYWORD="${PAD_KEYWORD:-}"      # pad/p5g/rp: 手柄 by-id 匹配子串 (空 = 任意 *-event-joystick 节点;
                                     #       P5 General 加密狗自身的节点已被固件排除)
-PAD_TRIG_THR="${PAD_TRIG_THR:-6}"   # pad/p5g: 触发阈值 % 满量程 (RT/LT 两键共享; 默认 6 = 该手柄
+PAD_TRIG_THR="${PAD_TRIG_THR:-6}"   # pad/p5g/rp: 触发阈值 % 满量程 (RT/LT 两键共享; 默认 6 = 该手柄
                                     #       扳机实测 flat 15/255 的上取整; 只作用于触发判定,
                                     #       扳机模拟量仍 1:1 透传; 热参 padthr)
 MOUSE_KEYWORD="${MOUSE_KEYWORD:-}"  # hid: 鼠标 by-id 匹配子串或 /dev/input/eventN (空 = 任意
                                     #       *-event-mouse 取字典序首个; 手柄插着时建议指定,
                                     #       否则可能选中手柄的附属鼠标接口)
-PAD_DUMP="${PAD_DUMP:-n}"           # pad/p5g: y = 每 ≥50ms 打一行合并逻辑态 (rx/ry/fire/ads/aim_gate)
+PAD_DUMP="${PAD_DUMP:-n}"           # pad/p5g/rp: y = 每 ≥50ms 打一行合并逻辑态 (rx/ry/fire/ads/aim_gate)
                                     #       — 现场诊断注入用 (看命令波形, 不影响行为)
 
 # ---- 自瞄参数 ----
@@ -122,6 +127,7 @@ LEAD="${LEAD:-5}"                   # 追踪超前 % (0 = 关; 上界 50 = 框�
 #   hid : 1.0 px/count      (counts 直接进游戏, 游戏内鼠标灵敏度是另一半)
 #   pad : 满偏屏幕速度 3000 px/s (控制律的注入按它折算摇杆偏转)
 #   p5g : 同 pad (输入/合并/注入链完全共用, 只是线上那一端是 PS5)
+#   rp  : 同 pad (输入/合并/注入链完全共用, 经局域网 UDP 遥控游玩直连 PS5)
 # 延迟: 本模式那一格 = 标定出的**物理环路延迟** (ms), 也是固件 -l 的输入。三个读数都锚在
 #   帧时间戳上, 而律的时间戳锚点也是帧交付时刻 —— 该时刻之后的 RGA 与推理处理 (H2D/exec/
 #   D2H/解码, 即日志 [AI FPS] 行的"推理段累计均值") 由律的 age 与 gap_scale 每拍承载, 再加
@@ -149,6 +155,12 @@ P5G_SPDX="${P5G_SPDX:-75}"              # 腰射 X 倍率 (热参 spdx)
 P5G_SPDY="${P5G_SPDY:-75}"              # 腰射 Y 倍率 (热参 spdy)
 P5G_ADS_SPDX="${P5G_ADS_SPDX:-75}"      # ADS 键按住时 X 倍率 (热参 adsspdx)
 P5G_ADS_SPDY="${P5G_ADS_SPDY:-75}"      # ADS 键按住时 Y 倍率 (热参 adsspdy)
+# --- rp: 物理手柄 → PS5 (libchiaki 遥控游玩纯控制会话, 局域网 UDP, 不占 UDC; 同 pad 基线) ---
+RP_L_EST="${RP_L_EST:-60.0}"            # 本模式延迟 ms (标定回写目标)
+RP_SPDX="${RP_SPDX:-75}"                # 腰射 X 倍率 (热参 spdx)
+RP_SPDY="${RP_SPDY:-75}"                # 腰射 Y 倍率 (热参 spdy)
+RP_ADS_SPDX="${RP_ADS_SPDX:-75}"        # ADS 键按住时 X 倍率 (热参 adsspdx)
+RP_ADS_SPDY="${RP_ADS_SPDY:-75}"        # ADS 键按住时 Y 倍率 (热参 adsspdy)
 
 # ---- 训练数据采集 (开关) ----
 CAPTURE="${CAPTURE:-n}"                 # y=开启截图采集  n=纯自瞄
@@ -196,10 +208,18 @@ case "${OUTPUT_MODE:-hid}" in
     SPD_X_V="${P5G_SPDX:-75}"; SPD_Y_V="${P5G_SPDY:-75}"
     ADS_X_V="${P5G_ADS_SPDX:-75}"; ADS_Y_V="${P5G_ADS_SPDY:-75}"
     ;;
+  rp)
+    MODE_ARGS=(-M rp -P "${PAD_KEYWORD:-}" -T "${PAD_TRIG_THR:-6}" --rp-account "${RP_ACCOUNT:-$ROOT/run/rp-account}")
+    [ -n "${RP_IFACE:-}" ] && MODE_ARGS+=(--rp-iface "$RP_IFACE")
+    [ "${PAD_DUMP:-n}" = "y" ] && MODE_ARGS+=(--pad-dump)
+    L_V="${RP_L_EST:-60.0}"
+    SPD_X_V="${RP_SPDX:-75}"; SPD_Y_V="${RP_SPDY:-75}"
+    ADS_X_V="${RP_ADS_SPDX:-75}"; ADS_Y_V="${RP_ADS_SPDY:-75}"
+    ;;
   *)
     # 未识别的取值不能落到某个模式上: 落到 hid 会静默走鼠标链并取 HID 那一格值, 与操作者
     #   写下的意图无关 (拼错的 PAD/ps5 都落在这一支), 故报错退出, 不兜底。
-    echo "❌ OUTPUT_MODE=\"${OUTPUT_MODE:-}\" 不是 hid / pad / p5g 之一 — 不启动"
+    echo "❌ OUTPUT_MODE=\"${OUTPUT_MODE:-}\" 不是 hid / pad / p5g / rp 之一 — 不启动"
     exit 1
     ;;
 esac

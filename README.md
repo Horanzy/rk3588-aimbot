@@ -134,15 +134,17 @@ reads the guard's effective value, not its literal text.
 
 | Script VAR | CLI | Meaning |
 |---|---|---|
-| `OUTPUT_MODE` | `-M` | `hid` / `pad` / `p5g` — mutually exclusive, each owns the UDC |
+| `OUTPUT_MODE` | `-M` | `hid` / `pad` / `p5g` / `rp` — mutually exclusive (`hid`/`pad`/`p5g` each own the UDC; `rp` uses LAN UDP) |
+| `RP_ACCOUNT` | `--rp-account` | rp: path to the `0600` pairing credential file (default `run/rp-account`) |
 | `MOUSE_KEYWORD` | `-D` | hid: mouse `by-id` substring or `/dev/input/eventN` (empty = lexicographically first `*-event-mouse`) |
-| `PAD_KEYWORD` | `-P` | pad/p5g: gamepad match substring (empty = any `*-event-joystick`; the dongle's own node is excluded) |
-| `PAD_TRIG_THR` | `-T` | pad/p5g: trigger threshold in % of full scale, shared by RT and LT; it gates the aim-trigger decision only — the analog value passes through 1:1 (hot param `padthr`) |
-| `PAD_DUMP` | `--pad-dump` | pad/p5g: log the merged logical state every ≥50 ms (injection debugging) |
-| `HID_L_EST` / `PAD_L_EST` / `P5G_L_EST` | `-l` | the calibrated **physical** loop delay (the law's anchor is the frame-delivery instant, so the inference leg the round skips is printed as a diagnostic and stays out of `L`; the frame-wait and RGA legs the round pays itself are already inside every reading), **one slot per output mode** — the only quantity the firmware ever writes back (each is hand-editable too) |
+| `PAD_KEYWORD` | `-P` | pad/p5g/rp: gamepad match substring (empty = any `*-event-joystick`; the dongle's own node is excluded) |
+| `PAD_TRIG_THR` | `-T` | pad/p5g/rp: trigger threshold in % of full scale, shared by RT and LT; it gates the aim-trigger decision only — the analog value passes through 1:1 (hot param `padthr`) |
+| `PAD_DUMP` | `--pad-dump` | pad/p5g/rp: log the merged logical state every ≥50 ms (injection debugging) |
+| `HID_L_EST` / `PAD_L_EST` / `P5G_L_EST` / `RP_L_EST` | `-l` | the calibrated **physical** loop delay (the law's anchor is the frame-delivery instant, so the inference leg the round skips is printed as a diagnostic and stays out of `L`; the frame-wait and RGA legs the round pays itself are already inside every reading), **one slot per output mode** — the only quantity the firmware ever writes back (each is hand-editable too) |
 | `HID_SPDX` `HID_SPDY` `HID_ADS_SPDX` `HID_ADS_SPDY` | `--spd` / `--ads-spd` | hid slot: pull-speed ratios, per axis (integer; `100` = baseline, larger = faster, meaningful band `5..2000`; shipped default `75` = the baseline at the 1440p deployment source) |
 | `PAD_SPDX` `PAD_SPDY` `PAD_ADS_SPDX` `PAD_ADS_SPDY` | `--spd` / `--ads-spd` | pad slot: the same four in the gamepad channel's units |
-| `P5G_SPDX` `P5G_SPDY` `P5G_ADS_SPDX` `P5G_ADS_SPDY` | `--spd` / `--ads-spd` | p5g slot: the same four for the PS5 channel |
+| `P5G_SPDX` `P5G_SPDY` `P5G_ADS_SPDX` `P5G_ADS_SPDY` | `--spd` / `--ads-spd` | p5g slot: the same four for the PS5 USB dongle channel |
+| `RP_SPDX` `RP_SPDY` `RP_ADS_SPDX` `RP_ADS_SPDY` | `--spd` / `--ads-spd` | rp slot: the same four for the PS5 Remote Play LAN channel |
 | `CLASS_ID` / `CLASS_N` | `-c` / `-n` | target class (`-1` = do not filter by class — the firmware does not clamp `-c`, so the panel passes it through as-is); model class count (`0` = derive from the attribute count — needed only by an unfolded DFL head, whose `reg_max` is not observable) |
 | `CONF_THRESH` / `Y_OFFSET` / `CAM_DEV` | `-t` / `-y` / `-d` | confidence, aim height offset, capture device (`/dev/videoN`; empty = resolve the receiver by driver name) |
 | `MAX_SPEED` | `-x` | crosshair speed cap px/s (derivation in the template; a pixel quantity, shipped as 2667 = the 1080p reference's 2000 carried to the 1440p deployment source) |

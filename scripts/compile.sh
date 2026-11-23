@@ -15,20 +15,71 @@ mkdir -p "$BUILD" "$BIN"
 
 CXX=g++
 CXX_FLAGS="-O3 -DNDEBUG -std=c++17"
-INCLUDES="-I$SRC -I/usr/include/opencv4 -I/usr/include/axcl -I/usr/local/include/rga"
+
+# ---- vendored libchiaki (-M rp 静态链接; 内容哈希 stamp 守卫) ----
+CHIAKI_SRC="$ROOT/third_party/chiaki-ng"
+CHIAKI_BUILD="$BUILD/chiaki"
+CHIAKI_STAMP="$CHIAKI_BUILD/.stamp"
+CHIAKI_CMAKE_FLAGS="-DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+  -DCMAKE_C_FLAGS=-std=gnu11 \
+  -DBUILD_SHARED_LIBS=OFF \
+  -DCHIAKI_ENABLE_GUI=OFF -DCHIAKI_ENABLE_CLI=OFF -DCHIAKI_ENABLE_TESTS=OFF \
+  -DCHIAKI_ENABLE_ANDROID=OFF -DCHIAKI_ENABLE_BOREALIS=OFF \
+  -DCHIAKI_ENABLE_SETSU=OFF -DCHIAKI_ENABLE_STEAMDECK_NATIVE=OFF \
+  -DCHIAKI_ENABLE_FFMPEG_DECODER=OFF -DCHIAKI_ENABLE_PI_DECODER=OFF \
+  -DCHIAKI_LIB_ENABLE_OPUS=OFF -DCHIAKI_ENABLE_SPEEX=OFF \
+  -DCHIAKI_ENABLE_STEAM_SHORTCUT=OFF \
+  -DCHIAKI_USE_SYSTEM_CURL=ON \
+  -DCHIAKI_USE_SYSTEM_NANOPB=OFF -DCHIAKI_USE_SYSTEM_JERASURE=OFF"
+
+CHIAKI_HASH="$(
+  {
+    printf '%s\n' "$CHIAKI_CMAKE_FLAGS"
+    find "$CHIAKI_SRC" -type f ! -path '*/.git/*' -print0 | LC_ALL=C sort -z | xargs -0 sha256sum
+  } | sha256sum | awk '{print $1}'
+)"
+
+if [ ! -f "$CHIAKI_STAMP" ] || [ "$(cat "$CHIAKI_STAMP" 2>/dev/null)" != "$CHIAKI_HASH" ] \
+   || [ ! -f "$CHIAKI_BUILD/lib/libchiaki.a" ]; then
+    echo "→ 构建 libchiaki ($CHIAKI_BUILD)"
+    # shellcheck disable=SC2086
+    cmake -S "$CHIAKI_SRC" -B "$CHIAKI_BUILD" \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+      -DCMAKE_C_FLAGS="-O3 -DNDEBUG -std=gnu11" \
+      -DBUILD_SHARED_LIBS=OFF \
+      -DCHIAKI_ENABLE_GUI=OFF -DCHIAKI_ENABLE_CLI=OFF -DCHIAKI_ENABLE_TESTS=OFF \
+      -DCHIAKI_ENABLE_ANDROID=OFF -DCHIAKI_ENABLE_BOREALIS=OFF \
+      -DCHIAKI_ENABLE_SETSU=OFF -DCHIAKI_ENABLE_STEAMDECK_NATIVE=OFF \
+      -DCHIAKI_ENABLE_FFMPEG_DECODER=OFF -DCHIAKI_ENABLE_PI_DECODER=OFF \
+      -DCHIAKI_LIB_ENABLE_OPUS=OFF -DCHIAKI_ENABLE_SPEEX=OFF \
+      -DCHIAKI_ENABLE_STEAM_SHORTCUT=OFF \
+      -DCHIAKI_USE_SYSTEM_CURL=ON \
+      -DCHIAKI_USE_SYSTEM_NANOPB=OFF -DCHIAKI_USE_SYSTEM_JERASURE=OFF
+    cmake --build "$CHIAKI_BUILD" --target chiaki-lib -j"$(nproc)"
+    printf '%s\n' "$CHIAKI_HASH" > "$CHIAKI_STAMP"
+else
+    echo "✅ libchiaki 内容未变, 复用 $CHIAKI_BUILD"
+fi
+
+CHIAKI_ARCHIVES="$(find "$CHIAKI_BUILD" -name '*.a' | sort | tr '\n' ' ')"
+CHIAKI_LIBS="-Wl,--start-group $CHIAKI_ARCHIVES -Wl,--end-group -lcurl -lssl -lcrypto -ljson-c -lminiupnpc -levent -lm"
+
+INCLUDES="-I$SRC -I$CHIAKI_SRC/lib/include -I$CHIAKI_BUILD/lib/include -I/usr/include/opencv4 -I/usr/include/axcl -I/usr/local/include/rga"
 OCV="-lopencv_core -lopencv_videoio -lopencv_highgui -lopencv_imgproc -lopencv_video -lopencv_imgcodecs"
 
 # axcl (NPU 运行时) 与 librga (裁切/格式转换) 都是**部署机自带的系统库**: axcl 装在
 #   /usr/lib/axcl 并已进 ldconfig (板级 BSP 的一部分), librga 装在 /usr/local (头文件
 #   /usr/local/include/rga) 并由 scripts/setup_platform.sh 从上游装好 —— 与本库自身放在
 #   哪里无关。
-LIBS="-L/usr/lib/axcl -laxcl_rt -laxcl_pkg -lrga"
+LIBS="-L/usr/lib/axcl -laxcl_rt -laxcl_pkg -lrga $CHIAKI_LIBS"
 PTHREAD="-pthread"
 
 # 模块清单 = src/ 下的全部可移植编译单元 (入口 main 与 core/io 各 .cpp 逐一对应)
 MODULES="main core/control core/estimator core/calib core/detect core/state core/proc_util \
          io/hid_mouse io/usbraw io/hotctl io/calib_run io/pad_input io/pad_output \
-         io/pad_xinput io/pad_p5g io/hdmi_in io/rga_pp io/npu_axcl io/capture"
+         io/pad_xinput io/pad_p5g io/pad_rp io/rp_account io/hdmi_in io/rga_pp io/npu_axcl io/capture"
 
 OBJS=""
 for m in $MODULES; do
@@ -93,6 +144,22 @@ $CXX -c "$SRC/io/hdmi_test.cpp" $CXX_FLAGS $INCLUDES -o "$BUILD/hdmi_test.o"
 $CXX "$BUILD/hdmi_test.o" $TEST_OBJS $LIBS $OCV $PTHREAD -o "$BUILD/hdmi_test"
 "$BUILD/hdmi_test"
 
+# RP 模式单测 (pad_rp_map 全 16 位黄金映射与摇杆直通 / rp_account 往返、0600、CRLF 与
+#   逐项拒绝 / 常量推导关系): 同一链接方式, 断言失败即终止整个编译。
+# shellcheck disable=SC2086
+$CXX -c "$SRC/io/rp_test.cpp" $CXX_FLAGS $INCLUDES -o "$BUILD/rp_test.o"
+# shellcheck disable=SC2086
+$CXX "$BUILD/rp_test.o" $TEST_OBJS $LIBS $OCV $PTHREAD -o "$BUILD/rp_test"
+"$BUILD/rp_test"
+
+# PS5 遥控游玩配对与连通探针 (只构建不执行):
+#   配对: ./build/rp_regist --host <PS5_IP> --account-id <B64> --pin <8位> --out run/rp-account
+#   探测: ./build/rp_regist --probe --account run/rp-account
+# shellcheck disable=SC2086
+$CXX -c "$ROOT/scripts/test/rp_regist.cpp" $CXX_FLAGS $INCLUDES -o "$BUILD/rp_regist.o"
+# shellcheck disable=SC2086
+$CXX "$BUILD/rp_regist.o" "$BUILD/io_rp_account.o" $CHIAKI_LIBS $PTHREAD -o "$BUILD/rp_regist"
+
 # HDMI IN 采集探针 (板端验收工具, 不是单测): 裸 V4L2 取帧 + RGA 裁剪/格式 + 与 mmap
 #   采集缓冲的逐字节 CPU 对照 + 各阶段 PNG。同一链接方式 (除 main.o 外的模块对象);
 #   它需要活动信号与 root, 故只构建不执行 —— 运行: sudo ./build/hdmi_probe 600
@@ -118,4 +185,4 @@ $CXX -c "$ROOT/scripts/test/pipeline_probe.cpp" $CXX_FLAGS $INCLUDES -o "$BUILD/
 # shellcheck disable=SC2086
 $CXX "$BUILD/pipeline_probe.o" $TEST_OBJS $LIBS $OCV $PTHREAD -o "$BUILD/pipeline_probe"
 
-echo "✅ 编译完成 (bin/aimbot + 可移植集 + 五个单测 + 采集探针 + NPU 探针 + 端到端探针) → $BUILD"
+echo "✅ 编译完成 (bin/aimbot + 可移植集 + 六个单测 + rp_regist + 采集探针 + NPU 探针 + 端到端探针) → $BUILD"

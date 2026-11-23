@@ -10,9 +10,17 @@ X-WebUI-Token 头, WS 走 ?token=。
 接收器、实例快照要拿实例状态锁) 一律丢进线程池 —— 一处阻塞调用就是所有请求一起排队。
 """
 import asyncio
+import base64
+import json
 import os
+import re
 import secrets
+import socket
+import subprocess
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import Optional
 
@@ -382,7 +390,7 @@ def api_instance_calib():
     p = _find_profile(stem) if stem else None
     if p is None:
         raise HTTPException(409, "认领实例 (非本 WebUI 启动): 不知道它读的是哪个 profile, 不盲发")
-    if (p["script_params"] or {}).get("output_mode") not in ("pad", "p5g"):
+    if (p["script_params"] or {}).get("output_mode") not in ("pad", "p5g", "rp"):
         raise HTTPException(409, "hid 模式的触发是鼠标双侧键长按 5 秒; 热参标定入口只给手柄模式")
     ok, err = S.inst.request_calib(S.cfg["hot_port"])
     if not ok:
@@ -462,6 +470,235 @@ def api_tasks():
 def api_task_log(tid: str, since: int = 0):
     lines = S.op.log_since(tid, since)
     return {"lines": lines, "seq": lines[-1][0] if lines else since}
+
+
+# ---------- PS5 遥控游玩 (-M rp) 配对与探测 ----------
+
+_RP_CLIENT_ID = "ba495a24-818c-472b-b12d-ff231c1b5745"
+_RP_CLIENT_SECRET = "mvaiZkRsAsI1IBkY"
+_RP_REDIRECT_URI = "https://remoteplay.dl.playstation.net/remoteplay/redirect"
+_RP_LOGIN_URL = (
+    "https://auth.api.sonyentertainmentnetwork.com/2.0/oauth/authorize"
+    "?service_entity=urn:service-entity:psn&response_type=code"
+    f"&client_id={_RP_CLIENT_ID}&redirect_uri={_RP_REDIRECT_URI}"
+    "&scope=psn:clientapp&request_locale=en_US&ui=pr&service_logo=ps"
+    "&layout_type=popup&smcid=remoteplay&prompt=always&PlatformPrivacyWs1=minimal&"
+)
+_RP_IFACE_RE = re.compile(r"^[A-Za-z0-9._:-]{1,15}$")
+
+
+def _wired_ifaces() -> list:
+    net = Path("/sys/class/net")
+    out = []
+    if not net.is_dir():
+        return out
+    for p in sorted(net.iterdir(), key=lambda x: x.name):
+        name = p.name
+        if name == "lo" or not _RP_IFACE_RE.match(name):
+            continue
+        if not (p / "device").exists():
+            continue
+        if (p / "wireless").exists() or (p / "phy80211").exists():
+            continue
+        try:
+            if int((p / "type").read_text().strip()) != 1:
+                continue
+        except (OSError, ValueError):
+            continue
+        try:
+            state = (p / "operstate").read_text().strip()
+        except OSError:
+            state = "unknown"
+        out.append({"name": name, "state": state})
+    return out
+
+
+def _read_rp_account_meta(path: Path) -> dict:
+    if not path.is_file():
+        return {"paired": False}
+    meta = {"paired": True, "path": str(path)}
+    try:
+        for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = [x.strip() for x in line.split("=", 1)]
+            if k in ("host", "account_id", "name", "iface"):
+                meta[k] = v
+    except OSError:
+        return {"paired": False}
+    return meta
+
+
+@app.get("/api/rp/status")
+def api_rp_status():
+    root = S.root()
+    acc_path = root / "run" / "rp-account"
+    return {
+        "account": _read_rp_account_meta(acc_path),
+        "wired_ifaces": _wired_ifaces(),
+        "has_regist_bin": (root / "build" / "rp_regist").is_file(),
+        "login_url": _RP_LOGIN_URL,
+    }
+
+
+class RpDiscoverIn(BaseModel):
+    iface: Optional[str] = None
+
+
+@app.post("/api/rp/discover")
+def api_rp_discover(inp: RpDiscoverIn):
+    ifaces = _wired_ifaces()
+    if not ifaces:
+        raise HTTPException(400, "未检测到物理有线以太网卡")
+    iface = (inp.iface or "").strip()
+    if iface:
+        if not _RP_IFACE_RE.match(iface) or iface not in [i["name"] for i in ifaces]:
+            raise HTTPException(400, f"网卡 {iface} 不是物理有线以太网卡")
+    else:
+        up = [i["name"] for i in ifaces if i["state"] == "up"]
+        iface = up[0] if up else ifaces[0]["name"]
+
+    py_probe = (
+        "import json,socket\n"
+        f"iface={iface!r}\n"
+        "s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)\n"
+        "s.setsockopt(socket.SOL_SOCKET,25,iface.encode()+b'\\x00')\n"
+        "s.setsockopt(socket.SOL_SOCKET,socket.SO_BROADCAST,1)\n"
+        "s.settimeout(2.0)\n"
+        "s.sendto(b'SRCH * HTTP/1.1\\ndevice-discovery-protocol-version:00030010\\n',('255.255.255.255',9302))\n"
+        "found=[]\n"
+        "try:\n"
+        "  while True:\n"
+        "    d,a=s.recvfrom(4096)\n"
+        "    info={'host':a[0],'name':'','type':''}\n"
+        "    for l in d.decode(errors='replace').splitlines():\n"
+        "      if l.lower().startswith('host-name:'): info['name']=l.split(':',1)[1].strip()\n"
+        "      elif l.lower().startswith('host-type:'): info['type']=l.split(':',1)[1].strip()\n"
+        "    found.append(info)\n"
+        "except socket.timeout: pass\n"
+        "print(json.dumps(found))\n"
+    )
+    cmd = proc.sudo_prefix() + ["python3", "-c", py_probe]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=6)
+    if r.returncode != 0:
+        raise HTTPException(500, (r.stderr or r.stdout or "扫描失败").strip())
+    try:
+        hosts = json.loads(r.stdout.strip() or "[]")
+    except json.JSONDecodeError:
+        hosts = []
+    return {"iface": iface, "hosts": hosts}
+
+
+class RpExchangeIn(BaseModel):
+    redirect_url: str
+
+
+@app.post("/api/rp/exchange-code")
+def api_rp_exchange_code(inp: RpExchangeIn):
+    raw = (inp.redirect_url or "").strip()
+    if not raw:
+        raise HTTPException(400, "请粘贴登录后跳转的 URL 或 code")
+    code = raw
+    if "://" in raw or "code=" in raw:
+        qs = urllib.parse.parse_qs(urllib.parse.urlparse(raw).query)
+        vals = qs.get("code") or []
+        if not vals:
+            raise HTTPException(400, "URL 中未找到 code 参数")
+        code = vals[0]
+    auth = base64.b64encode(f"{_RP_CLIENT_ID}:{_RP_CLIENT_SECRET}".encode()).decode()
+    body = urllib.parse.urlencode({
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": _RP_REDIRECT_URI,
+    }).encode("ascii")
+    try:
+        req = urllib.request.Request(
+            "https://auth.api.sonyentertainmentnetwork.com/2.0/oauth/token",
+            data=body,
+            headers={"Authorization": "Basic " + auth, "Content-Type": "application/x-www-form-urlencoded"},
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            tok = json.loads(resp.read().decode())["access_token"]
+        req2 = urllib.request.Request(
+            "https://us-prof.np.community.playstation.net/userProfile/v1/users/me/profile2?fields=accountId,onlineId",
+            headers={"Authorization": "Bearer " + tok},
+        )
+        with urllib.request.urlopen(req2, timeout=15) as resp2:
+            prof = json.loads(resp2.read().decode())["profile"]
+        aid = int(prof["accountId"])
+        b64 = base64.b64encode(aid.to_bytes(8, "little")).decode()
+        return {"account_id": b64, "online_id": prof.get("onlineId", "")}
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode(errors="replace")[:300]
+        raise HTTPException(400, f"Sony 接口返回 {e.code} (code 可能已过期，请重新登录获取): {detail}")
+    except Exception as e:
+        raise HTTPException(500, f"换算 Account-ID 失败: {e}")
+
+
+class RpPairIn(BaseModel):
+    host: str
+    account_id: str
+    pin: str
+    name: Optional[str] = ""
+    iface: Optional[str] = ""
+
+
+@app.post("/api/rp/pair")
+def api_rp_pair(inp: RpPairIn):
+    root = S.root()
+    bin_p = root / "build" / "rp_regist"
+    if not bin_p.is_file():
+        raise HTTPException(400, "缺少 build/rp_regist，请先在【模型与运维】点编译")
+    host = (inp.host or "").strip()
+    aid = (inp.account_id or "").strip()
+    pin = (inp.pin or "").strip()
+    name = (inp.name or "").strip()
+    iface = (inp.iface or "").strip()
+    if not host or any(c.isspace() or c in "/\\" for c in host):
+        raise HTTPException(400, "PS5 IP / 主机名格式无效")
+    if not re.match(r"^[0-9]{8}$", pin):
+        raise HTTPException(400, "配对 PIN 必须是 8 位数字")
+    if iface and (not _RP_IFACE_RE.match(iface) or iface not in [i["name"] for i in _wired_ifaces()]):
+        raise HTTPException(400, f"网卡 {iface} 不是物理有线以太网卡")
+
+    out_path = root / "run" / "rp-account"
+    argv = proc.sudo_prefix() + [
+        str(bin_p), "--host", host, "--account-id", aid, "--pin", pin, "--out", str(out_path),
+    ]
+    if name:
+        argv += ["--name", name]
+    if iface:
+        argv += ["--iface", iface]
+    r = subprocess.run(argv, capture_output=True, text=True, timeout=70)
+    out = (r.stdout + "\n" + r.stderr).strip()
+    if r.returncode != 0:
+        raise HTTPException(400, out or "配对失败")
+    return {"ok": True, "output": out, "account": _read_rp_account_meta(out_path)}
+
+
+class RpProbeIn(BaseModel):
+    iface: Optional[str] = ""
+
+
+@app.post("/api/rp/probe")
+def api_rp_probe(inp: RpProbeIn):
+    root = S.root()
+    bin_p = root / "build" / "rp_regist"
+    acc_p = root / "run" / "rp-account"
+    if not bin_p.is_file():
+        raise HTTPException(400, "缺少 build/rp_regist，请先编译")
+    if not acc_p.is_file():
+        raise HTTPException(400, "尚未配对 (缺少 run/rp-account)")
+    iface = (inp.iface or "").strip()
+    if iface and (not _RP_IFACE_RE.match(iface) or iface not in [i["name"] for i in _wired_ifaces()]):
+        raise HTTPException(400, f"网卡 {iface} 不是物理有线以太网卡")
+    argv = proc.sudo_prefix() + [str(bin_p), "--probe", "--account", str(acc_p)]
+    if iface:
+        argv += ["--iface", iface]
+    r = subprocess.run(argv, capture_output=True, text=True, timeout=25)
+    out = (r.stdout + "\n" + r.stderr).strip()
+    return {"ok": r.returncode == 0, "output": out}
 
 
 # ---------- WebSocket ----------

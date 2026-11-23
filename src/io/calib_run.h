@@ -157,12 +157,13 @@ enum CalMode { CAL_MODE_HID = 0, CAL_MODE_PAD = 1 };
 constexpr int CAL_MODES_N = 2;
 
 // ---- 计划参数 (推导见文件头) ----
-// 回写的 VAR 名: 一个输出模式一条 (三套输出各占一格延迟, 互不覆盖; 速度 VAR 是手动项,
-//   固件永不写)。pad 与 p5g 共用同一套激励计划, 但各写各的延迟槽 —— 手柄输出到 PC 与
-//   到 PS5 的环路不同 (p5g 多一跳签名往返), 一个数代表不了另一条。
+// 回写的 VAR 名: 一个输出模式一条 (四套输出各占一格延迟, 互不覆盖; 速度 VAR 是手动项,
+//   固件永不写)。pad、p5g 与 rp 共用同一套激励计划, 但各写各的延迟槽 —— 手柄输出到
+//   PC、到 PS5 (含加密狗签名往返) 与经局域网遥控游玩到 PS5 的环路不同, 一个数代表不了另一条。
 constexpr const char* CAL_VAR_HID = "HID_L_EST";
 constexpr const char* CAL_VAR_PAD = "PAD_L_EST";
 constexpr const char* CAL_VAR_P5G = "P5G_L_EST";
+constexpr const char* CAL_VAR_RP  = "RP_L_EST";
 // 每轴对 (方向 +/−) 数: 读数族要有 ≥ CAL_MIN_READINGS 条才谈得上"中位 + MAD".
 //   pad 只扫一轴 → 该轴的对数就是全轮的对数 → 3 对 = 6 个尾迹读数 (>5);
 //   hid 两轴合并 → 2 对 = 8 条 (>5), 逐轴 4 条只作并列报出的诊断。

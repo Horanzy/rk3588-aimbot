@@ -93,7 +93,9 @@
 #include "io/pad_input.h"
 #include "io/pad_output.h"
 #include "io/pad_p5g.h"
+#include "io/pad_rp.h"
 #include "io/pad_xinput.h"
+#include "io/rp_account.h"
 #include "io/usbraw.h"
 
 // ========================= 命令行交互 =========================
@@ -130,7 +132,7 @@ int main(int argc, char* argv[]) {
 
     std::string a_m,a_c,a_t,a_y,a_d,a_n,a_x,a_l,a_S,a_k,a_v,a_r,a_D;
     std::string a_o,a_a,a_e,a_spd,a_adsspd,a_smooth,a_lead; bool have_e=false;
-    std::string a_M,a_P,a_T; bool pad_dump=false;
+    std::string a_M,a_P,a_T,a_rp_acc,a_rp_iface; bool pad_dump=false;
     int fire_ms=300; double auto_s=10;
     int cooldown_ms=500; int jpeg_q=95;
 
@@ -179,6 +181,8 @@ int main(int argc, char* argv[]) {
         else if (arg=="-M"&&i+1<argc) a_M=argv[++i];
         else if (arg=="-P"&&i+1<argc) a_P=argv[++i];
         else if (arg=="-T"&&i+1<argc) a_T=argv[++i];
+        else if (arg=="--rp-account"&&i+1<argc) a_rp_acc=argv[++i];
+        else if (arg=="--rp-iface"&&i+1<argc) a_rp_iface=argv[++i];
         else if (arg=="--pad-dump") pad_dump=true;
         else if (arg=="--spd"&&i+1<argc) a_spd=argv[++i];
         else if (arg=="--ads-spd"&&i+1<argc) a_adsspd=argv[++i];
@@ -194,7 +198,7 @@ int main(int argc, char* argv[]) {
                 "  -x <速度>  最大px/s\n"
                 "  -l <L>     初始环路延迟 (标定出的物理环路延迟; 标定回写与运行态生效的就是它)\n"
                 "  -S <脚本>  回写路径 (标定只写本输出模式的延迟 VAR:\n"
-                "             hid → HID_L_EST, pad → PAD_L_EST, p5g → P5G_L_EST)\n"
+                "             hid → HID_L_EST, pad → PAD_L_EST, p5g → P5G_L_EST, rp → RP_L_EST)\n"
                 "  -k <键>   fire/ads/both  -v <y/n> 预览\n"
                 "  --spd <x>[,<y>]      拉枪速度倍率逐轴 (默认 100 = 基线; 调大=更快; 热参 spdx/spdy)\n"
                 "  --ads-spd <x>[,<y>]  ADS 键按住时的同一对 (默认 100; 热参 adsspdx/adsspdy)\n"
@@ -217,6 +221,10 @@ int main(int argc, char* argv[]) {
                 "             p5g=PS5 手柄输出: 同一输入/合并/标定链, 对 PS5 呈现 P5 General\n"
                 "                 加密狗 (0x2B81/0x0101), 真加密狗插本机 USB 口作签名协处理器\n"
                 "                 (每份报告经它签名后才上线; 缺席时不产生任何报告)\n"
+                "             rp=PS5 遥控游玩纯控制输出: 同一输入/合并/标定链, 经局域网 UDP\n"
+                "                 直连 PS5 遥控游玩服务 (音视频全丢, 不占 UDC)\n"
+                "  --rp-account <路径>  rp 模式的配对凭据文件 (含 host/account_id/regist_key/morning)\n"
+                "  --rp-iface <网卡>    rp 强制绑定的有线网卡 (缺省自动选物理有线以太网; 禁止无线)\n"
                 "  -P <子串>  手柄 /dev/input/by-id 匹配子串 (默认空 = 任一 *-event-joystick\n"
                 "             节点; P5 General 加密狗自身的节点已被排除)\n"
                 "  -T <百分比> 手柄触发阈值 (默认 6 = 该手柄扳机实测 flat 15/255; RT/LT\n"
@@ -292,17 +300,42 @@ int main(int argc, char* argv[]) {
     if (!parse_spd(a_adsspd,ads_spd_x,ads_spd_y,"--ads-spd")) return 1;
 
     // 输出模式: hid (USB raw_gadget 鼠标) / pad (XInput 手柄输出) / p5g (PS5 手柄
-    //   输出) — 互斥, 缺省 hid。三者的参数展开一致 (pad 与 p5g 只换输出后端,
-    //   输入/合并/标定链与逐轴 spd 倍率完全共用), 各自独占 UDC 的 raw_gadget 会话。
+    //   输出) / rp (PS5 遥控游玩纯控制输出) — 互斥, 缺省 hid。四者里 pad/p5g/rp
+    //   共用同一条手柄输入/合并/标定链与逐轴 spd 倍率; hid/pad/p5g 各自独占 UDC,
+    //   rp 走局域网 UDP 不占 UDC。
     const std::string out_mode=a_M.empty()?"hid":a_M;
-    if (out_mode!="hid"&&out_mode!="pad"&&out_mode!="p5g") {
-        std::cerr<<"❌ 未知模式 \""<<out_mode<<"\" (用 hid / pad / p5g)\n"; return 1;
+    if (out_mode!="hid"&&out_mode!="pad"&&out_mode!="p5g"&&out_mode!="rp") {
+        std::cerr<<"❌ 未知模式 \""<<out_mode<<"\" (用 hid / pad / p5g / rp)\n"; return 1;
     }
     const bool p5g_mode=(out_mode=="p5g");
+    const bool rp_mode =(out_mode=="rp");
     const bool pad_mode=(out_mode!="hid");        // 手柄通道: 输入/合并/标定/账本路由
-    // 标定回写的延迟 VAR: 三套输出各一格 (各脚本里各占一行), 按本次输出模式三选一。
-    //   激励计划仍只有两套 (hid 一套, pad 与 p5g 共用), 变的是值落在哪个槽里。
-    const char* cal_var = p5g_mode ? CAL_VAR_P5G : (pad_mode ? CAL_VAR_PAD : CAL_VAR_HID);
+    // 标定回写的延迟 VAR: 四套输出各一格 (各脚本里各占一行), 按本次输出模式四选一。
+    //   激励计划仍只有两套 (hid 一套, 手柄族共用), 变的是值落在哪个槽里。
+    const char* cal_var = rp_mode ? CAL_VAR_RP
+                        : (p5g_mode ? CAL_VAR_P5G : (pad_mode ? CAL_VAR_PAD : CAL_VAR_HID));
+    RpAccount rp_acc{};
+    if (rp_mode) {
+        if (a_rp_acc.empty()) {
+            std::cerr<<"❌ -M rp 必须指定 --rp-account <凭据路径> (先用 build/rp_regist 配对)\n";
+            return 1;
+        }
+        std::string rp_err;
+        if (!rp_account_load(a_rp_acc, rp_acc, &rp_err)) {
+            std::cerr<<"❌ "<<rp_err<<"\n";
+            return 1;
+        }
+        if (!a_rp_iface.empty()) {
+            if (!rp_valid_iface(a_rp_iface) || rp_is_wireless_iface(a_rp_iface)) {
+                std::cerr<<"❌ --rp-iface \""<<a_rp_iface<<"\" 非法或为无线网卡 (rp 仅允许有线网卡)\n";
+                return 1;
+            }
+            rp_acc.iface = a_rp_iface;
+        }
+    } else {
+        if (!a_rp_acc.empty()) std::cout<<"⚠ 忽略 --rp-account (仅 rp 模式)\n";
+        if (!a_rp_iface.empty()) std::cout<<"⚠ 忽略 --rp-iface (仅 rp 模式)\n";
+    }
     if (!a_P.empty()&&!pad_mode) std::cout<<"⚠ 忽略 -P (仅手柄模式: 手柄选择)\n";
     if (!a_T.empty()&&!pad_mode) std::cout<<"⚠ 忽略 -T (仅手柄模式: 扳机触发阈值)\n";
     if (pad_dump&&!pad_mode) std::cout<<"⚠ 忽略 --pad-dump (仅手柄模式)\n";
@@ -381,11 +414,10 @@ int main(int argc, char* argv[]) {
     MouseState state;
     UsbRawSession usb;
     PadState padst;
-    // 三模式单次运行只居其一, 且各自独占 UDC: hid = USB raw_gadget 鼠标,
-    //   pad = XInput 有线手柄 (0x045E/0x028E), p5g = P5G 加密狗形态 HID 手柄
-    //   (0x2B81/0x0101; 真加密狗经 hidraw 作签名协处理器, 缺席不阻塞启动)
-    if      (p5g_mode) { if (!pad_p5g_start())   return 1; }
-    else if (pad_mode) { if (!pad_xinput_start()) return 1; }
+    // 四模式单次运行只居其一: hid/pad/p5g 各自独占 UDC, rp 经局域网 UDP 直连 PS5
+    if      (rp_mode)  { if (!pad_rp_start(rp_acc)) return 1; }
+    else if (p5g_mode) { if (!pad_p5g_start())      return 1; }
+    else if (pad_mode) { if (!pad_xinput_start())   return 1; }
     else               { if (!hid_mouse_start(state,usb,a_D)) return 1; }
 
     signal(SIGINT,signal_handler); signal(SIGTERM,signal_handler);
@@ -399,7 +431,11 @@ int main(int argc, char* argv[]) {
              <<" spd_x="<<spd_x<<" spd_y="<<spd_y
              <<" ads_spd_x="<<ads_spd_x<<" ads_spd_y="<<ads_spd_y<<" fov="<<fov_r
              <<" smooth="<<smooth_pct<<" lead="<<lead_pct<<"\n";
-    if (p5g_mode)
+    if (rp_mode)
+        std::cout<<"模式: rp (PS5 遥控游玩纯控制会话 → "<<rp_acc.host
+                 <<", 不占 UDC; 物理手柄全透传"
+                 <<(pad_dump?", --pad-dump 叠加打印":"")<<")  触发阈值="<<pad_trig_thr<<"%\n";
+    else if (p5g_mode)
         std::cout<<"模式: p5g (对 PS5 呈现 P5 General 手柄 0x2B81/0x0101, 真加密狗"
                     "经 hidraw 签名; 物理手柄全透传"
                  <<(pad_dump?", --pad-dump 叠加打印":"")<<")  触发阈值="<<pad_trig_thr<<"%\n";
@@ -467,8 +503,9 @@ int main(int argc, char* argv[]) {
 
     global_running=false;
     g_save_cv.notify_all();
-    // 输出后端先停 (它持有 UDC 的 raw_gadget 会话), 再停输入读取线程与其它线程
-    if (p5g_mode) pad_p5g_stop();
+    // 输出后端先停 (hid/pad/p5g 持有 UDC, rp 持有 UDP 会话), 再停输入读取线程与其它线程
+    if (rp_mode) pad_rp_stop();
+    else if (p5g_mode) pad_p5g_stop();
     else if (pad_mode) pad_xinput_stop();
     else hid_mouse_stop(usb);
     if (pad_reader.joinable()) pad_reader.join();

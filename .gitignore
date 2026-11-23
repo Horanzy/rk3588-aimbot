@@ -15,6 +15,9 @@ dataset/
 # ---- WebUI 运行时状态 (config/profile/历史, 只留在设备上) ----
 webui/data/
 
+# ---- 运行时凭据 (如 run/rp-account, 只留在设备上) ----
+run/
+
 # ---- arena 诊断输出 (trace CSV/PNG, 可再生) ----
 arena/trace_out/
 

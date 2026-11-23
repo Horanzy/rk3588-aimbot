@@ -182,6 +182,49 @@
       </div>
 
       <div class="card">
+        <div class="card-hd">
+          <h3>PS5 遥控游玩配对 (-M rp)</h3>
+          <div class="card-tools">
+            <span class="hint" id="rpStatusBadge">未检查</span>
+            <button id="btnRpRefresh" class="btn small">刷新状态</button>
+          </div>
+        </div>
+        <p class="hint">配对只需做一次，凭据保存在 <code>run/rp-account</code>（0600 权限）；全部流量经 <code>SO_BINDTODEVICE</code> 强制走物理有线网卡，有线断开绝不回落 WiFi。</p>
+        <div class="form-row">
+          <label class="inline-label">PS5 IP (host)
+            <input id="rpHost" type="text" spellcheck="false" placeholder="例如 192.168.1.50" style="width:12em">
+          </label>
+          <button id="btnRpDiscover" class="btn small">🔍 扫描局域网 PS5</button>
+          <label class="inline-label">有线网卡 (留空=自动)
+            <select id="rpIface"></select>
+          </label>
+          <label class="inline-label">备注名
+            <input id="rpName" type="text" spellcheck="false" placeholder="可选，如 客厅PS5" style="width:10em">
+          </label>
+        </div>
+        <div class="form-row">
+          <label class="inline-label">PSN Account-ID (Base64)
+            <input id="rpAccountId" type="text" spellcheck="false" placeholder="12 位 Base64" style="width:15em">
+          </label>
+          <a id="rpLoginLink" class="btn small" href="#" target="_blank" rel="noopener">1. 打开 Sony 登录页</a>
+        </div>
+        <div class="form-row">
+          <label class="inline-label">登录后跳转 URL / code
+            <input id="rpRedirectUrl" type="text" spellcheck="false" placeholder="粘贴地址栏 https://remoteplay.dl.playstation.net/remoteplay/redirect?code=..." style="width:30em">
+          </label>
+          <button id="btnRpExchange" class="btn small">2. 换算 Account-ID</button>
+        </div>
+        <div class="form-row">
+          <label class="inline-label">PS5 8 位配对 PIN (设置→系统→遥控游玩→关联设备)
+            <input id="rpPin" type="text" inputmode="numeric" maxlength="8" spellcheck="false" placeholder="8 位数字" style="width:9em">
+          </label>
+          <button id="btnRpPair" class="btn primary">3. 配对并保存</button>
+          <button id="btnRpProbe" class="btn">🩺 连通探测</button>
+        </div>
+        <pre id="rpLog" class="cmdbox hidden"></pre>
+      </div>
+
+      <div class="card">
         <div class="card-hd"><h3>外观</h3></div>
         <div class="form-row">
           <label class="inline-label">主题

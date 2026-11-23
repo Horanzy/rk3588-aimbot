@@ -30,8 +30,8 @@ SCRIPT_STEM_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 #   它们在双引号里原样成立, 只有上列字符才有语义。非 ASCII 字节不在此列 (shell 只对 ASCII 的
 #   元字符有解释)。
 _VALUE_UNSAFE_RE = re.compile(r"""[\x00-\x1f\x7f"'`$\\#;|&<>(){}[\]*?!~]""")
-# 输出模式: 三套输出互斥, 各自独占 UDC (顺序也是 UI 里分组的顺序)
-OUTPUT_MODES = ("hid", "pad", "p5g")
+# 输出模式: 四套输出互斥, hid/pad/p5g 各自独占 UDC, rp 经局域网 UDP 不占 UDC (顺序也是 UI 里分组的顺序)
+OUTPUT_MODES = ("hid", "pad", "p5g", "rp")
 # 模板约定: 每个手改量写成 ${VAR:-默认}, 缺行也能起。读脚本时必须解析到**有效值**,
 #   否则 UI 看到的是 ${CLASS_ID:-0} 这样的字面量而不是 0。
 _GUARD_RE = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*:-?(.*)\}$", re.S)
